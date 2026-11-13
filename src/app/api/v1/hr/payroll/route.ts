@@ -5,16 +5,43 @@ import { prisma } from '@/lib/prisma';
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
+    const periodId = searchParams.get('periodId');
     const monthParam = searchParams.get('month');
     const yearParam = searchParams.get('year');
 
     let dateFilter = {};
-    if (monthParam && yearParam) {
+    let periodLabel = 'Consolidado General';
+    let periodDetails = null;
+
+    // 1. PRIORIDAD: Filtrar por el Período de Planilla seleccionado (PayrollPeriod)
+    if (periodId) {
+      const selectedPeriod = await prisma.payrollPeriod.findUnique({
+        where: { id: periodId },
+      });
+
+      if (selectedPeriod) {
+        periodDetails = selectedPeriod;
+        periodLabel = selectedPeriod.name;
+        // Ajustar fin del día para cubrir todas las marcas del último día del corte
+        const endOfDay = new Date(selectedPeriod.endDate);
+        endOfDay.setUTCHours(23, 59, 59, 999);
+
+        dateFilter = {
+          date: {
+            gte: selectedPeriod.startDate,
+            lte: endOfDay,
+          },
+        };
+      }
+    } 
+    // 2. RESPALDO: Mantener filtro antiguo por mes y año si no se envía periodId
+    else if (monthParam && yearParam) {
       const month = parseInt(monthParam);
       const year = parseInt(yearParam);
       const startDate = new Date(year, month - 1, 1);
       const endDate = new Date(year, month, 0, 23, 59, 59);
       dateFilter = { date: { gte: startDate, lte: endDate } };
+      periodLabel = `${monthParam}/${yearParam}`;
     }
 
     const users = await prisma.user.findMany({
@@ -90,7 +117,8 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       success: true,
-      period: monthParam && yearParam ? `${monthParam}/${yearParam}` : 'Consolidado General',
+      period: periodLabel,
+      periodDetails,
       company: users[0]?.company?.name || 'HYPERION DIGITAL SECURITY S.A.C.',
       ruc: users[0]?.company?.ruc || '20608810987',
       payroll: payrollReport,

@@ -2,7 +2,17 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { FileCheck2, PlusCircle, Clock, Check, X, Eye, Signature, FileText } from 'lucide-react';
+import {
+  FileCheck2,
+  PlusCircle,
+  Clock,
+  Check,
+  X,
+  Eye,
+  Signature,
+  FileText,
+  CalendarCheck,
+} from 'lucide-react';
 
 interface Permission {
   id: string;
@@ -11,9 +21,10 @@ interface Permission {
   startDate: string;
   endDate: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
-  employeeSignature?: string | null; // Firma táctil Base64 desde Flutter
+  approvedBy?: string | null;
+  employeeSignature?: string | null;
   signedPdfBase64?: string | null;
-  signatureCode?: string | null;     // Código de firma devuelto por Camercloud
+  signatureCode?: string | null;
   user: {
     id: string;
     name: string;
@@ -33,6 +44,8 @@ export default function PermissionsPage() {
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [users, setUsers] = useState<UserOption[]>([]);
   const [loading, setLoading] = useState(true);
+  const [processingId, setProcessingId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'PENDING' | 'APPROVED' | 'REJECTED'>('ALL');
   const [showModal, setShowModal] = useState(false);
   const [selectedSignature, setSelectedSignature] = useState<string | null>(null);
 
@@ -71,47 +84,59 @@ export default function PermissionsPage() {
     loadData();
   }, []);
 
-  // Función para aprobar y firmar digitalmente con Camercloud o rechazar la solicitud
-  const handleUpdateStatus = async (requestId: string, newStatus: 'APPROVED' | 'REJECTED') => {
+  // Aprobar (con firma Camercloud + sincronización de asistencia) o Rechazar
+  const handleUpdateStatus = async (
+    perm: Permission,
+    newStatus: 'APPROVED' | 'REJECTED',
+    isPaidPermit = true
+  ) => {
+    const storedUser = localStorage.getItem('user');
+    const admin = storedUser ? JSON.parse(storedUser) : null;
+
+    if (!admin?.id) {
+      alert('No se detectó la sesión del administrador.');
+      return;
+    }
+
+    if (
+      newStatus === 'REJECTED' &&
+      !confirm(`¿Confirmas rechazar la solicitud de ${perm.user.name} ${perm.user.lastName}?`)
+    ) {
+      return;
+    }
+
+    setProcessingId(perm.id);
     try {
-      if (newStatus === 'APPROVED') {
-        // 1. Invocar el proceso de firma digital en Camercloud
-        const resSign = await fetch('/api/v1/hr/permissions/sign', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ permissionId: requestId }),
-        });
-
-        if (resSign.ok) {
-          alert('Papeleta aprobada y firmada digitalmente con éxito mediante Camercloud.');
-          loadData();
-          return;
-        } else {
-          const err = await resSign.json().catch(() => ({}));
-          alert(`Error firmando con Camercloud: ${err.error || 'Fallo inesperado'}`);
-          return;
-        }
-      }
-
-      // Si es rechazar, simplemente actualizamos el estado
       const res = await fetch('/api/v1/hr/permissions', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          requestId,
+          requestId: perm.id,
           status: newStatus,
-          approvedBy: 'RRHH Administrator',
+          adminId: admin.id,
+          approvedBy: admin.name || 'RRHH Administrator',
+          isPaidPermit,
         }),
       });
 
+      const data = await res.json();
+
       if (res.ok) {
-        alert('Solicitud rechazada correctamente.');
+        if (newStatus === 'APPROVED') {
+          alert(
+            `Papeleta aprobada, firmada digitalmente con Camercloud y sincronizada en Control de Asistencia (${isPaidPermit ? 'Con Goce' : 'Sin Goce'}).`
+          );
+        } else {
+          alert('Solicitud rechazada y auditada correctamente.');
+        }
         loadData();
       } else {
-        alert('Error al actualizar el estado de la solicitud');
+        alert(data.error || 'Error al procesar la solicitud.');
       }
-    } catch (e) {
-      alert('Error de comunicación con el servidor');
+    } catch {
+      alert('Error de comunicación con el servidor.');
+    } finally {
+      setProcessingId(null);
     }
   };
 
@@ -129,6 +154,8 @@ export default function PermissionsPage() {
         body: JSON.stringify(formData),
       });
 
+      const data = await res.json();
+
       if (res.ok) {
         alert('Solicitud de permiso/papeleta registrada correctamente.');
         setShowModal(false);
@@ -141,10 +168,9 @@ export default function PermissionsPage() {
         });
         loadData();
       } else {
-        const errData = await res.json();
-        alert(errData.error || 'Error registrando el permiso');
+        alert(data.error || 'Error registrando el permiso');
       }
-    } catch (e) {
+    } catch {
       alert('Error de conexión con el servidor');
     }
   };
@@ -166,6 +192,12 @@ export default function PermissionsPage() {
     }
   };
 
+  const filteredPermissions = permissions.filter(
+    (p) => statusFilter === 'ALL' || p.status === statusFilter
+  );
+
+  const pendingCount = permissions.filter((p) => p.status === 'PENDING').length;
+
   const inputClass =
     'w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-xs text-white placeholder:text-slate-500 focus:border-[#00BFA5] focus:outline-none';
 
@@ -179,15 +211,63 @@ export default function PermissionsPage() {
             Permisos, Licencias y Papeletas Digitales
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Gestión justificada de inasistencias y salidas temporales bajo normativa SUNAFIL.
+            Gestión justificada de inasistencias con firma Camercloud PAdES-B e impacto automático en Asistencia.
           </p>
         </div>
         <button
           onClick={() => setShowModal(true)}
-          className="flex items-center gap-2 bg-[#005F87] hover:bg-[#005F87]/80 text-white text-xs font-bold px-4 py-2.5 rounded-lg shadow-md border border-[#00BFA5]/30 transition"
+          className="flex items-center gap-2 bg-[#005F87] hover:bg-[#005F87]/80 text-white text-xs font-bold px-4 py-2.5 rounded-lg shadow-md border border-[#00BFA5]/30 transition cursor-pointer"
         >
           <PlusCircle className="w-4 h-4 text-[#00BFA5]" />
           Nueva Solicitud de Permiso
+        </button>
+      </div>
+
+      {/* Pestañas de Filtro por Estado */}
+      <div className="flex flex-wrap items-center gap-2 bg-slate-950 p-1.5 rounded-xl border border-slate-800 w-fit">
+        <button
+          type="button"
+          onClick={() => setStatusFilter('ALL')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+            statusFilter === 'ALL'
+              ? 'bg-[#005F87] text-white'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          Todas ({permissions.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setStatusFilter('PENDING')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+            statusFilter === 'PENDING'
+              ? 'bg-amber-600 text-white'
+              : 'text-amber-400 hover:bg-slate-900'
+          }`}
+        >
+          ⏳ Pendientes ({pendingCount})
+        </button>
+        <button
+          type="button"
+          onClick={() => setStatusFilter('APPROVED')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+            statusFilter === 'APPROVED'
+              ? 'bg-emerald-700 text-white'
+              : 'text-emerald-400 hover:bg-slate-900'
+          }`}
+        >
+          ✓ Aprobadas ({permissions.filter((p) => p.status === 'APPROVED').length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setStatusFilter('REJECTED')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+            statusFilter === 'REJECTED'
+              ? 'bg-rose-700 text-white'
+              : 'text-rose-400 hover:bg-slate-900'
+          }`}
+        >
+          ✕ Rechazadas ({permissions.filter((p) => p.status === 'REJECTED').length})
         </button>
       </div>
 
@@ -196,97 +276,132 @@ export default function PermissionsPage() {
         <p className="text-xs text-slate-500 text-center py-8">
           Cargando registros de permisos y licencias...
         </p>
-      ) : permissions.length === 0 ? (
+      ) : filteredPermissions.length === 0 ? (
         <div className="bg-slate-950 border border-slate-800 rounded-xl p-8 text-center text-xs text-slate-500">
-          No existen solicitudes registradas en la base de datos.
+          No existen solicitudes en esta categoría.
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4">
-          {permissions.map((p) => (
-            <div
-              key={p.id}
-              className="bg-slate-950 border border-slate-800 rounded-xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 hover:border-slate-700 transition"
-            >
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-white">
-                    {p.user ? `${p.user.name} ${p.user.lastName}` : 'Colaborador'}
-                  </span>
-                  <span className="text-[10px] font-mono bg-slate-800 text-slate-400 px-2 py-0.5 rounded">
-                    DNI: {p.user?.dni}
-                  </span>
-                </div>
-                <p className="text-xs font-semibold text-[#00BFA5]">
-                  {mapTypeLabel(p.type)}
-                </p>
-                <p className="text-xs text-slate-400">{p.reason}</p>
-                <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500 pt-1">
-                  <Clock className="w-3.5 h-3.5 text-slate-400" />
-                  Desde: {new Date(p.startDate).toLocaleString('es-PE')} — Hasta:{' '}
-                  {new Date(p.endDate).toLocaleString('es-PE')}
-                </div>
-              </div>
-
-              {/* Acciones de RRHH: Botones de Firma, PDF y Estado */}
-              <div className="flex items-center gap-3">
-                {/* 1. Botón para ver la firma táctil enviada desde Flutter */}
-                {p.employeeSignature ? (
-                  <button
-                    onClick={() => setSelectedSignature(p.employeeSignature!)}
-                    className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-medium px-3 py-1.5 rounded-lg transition"
-                  >
-                    <Eye className="w-3.5 h-3.5 text-[#00BFA5]" />
-                    Ver Firma
-                  </button>
-                ) : (
-                  <span className="text-[11px] text-slate-500 italic">Sin firma</span>
-                )}
-
-                {/* 2. Botón para abrir/descargar el PDF firmado por Camercloud */}
-                {p.status === 'APPROVED' && (
-                  <button
-                    onClick={() => {
-                      // Apunta prioritariamente al signatureCode de Camercloud, o al id del permiso
-                      const identifier = p.signatureCode || p.id;
-                      window.open(`/api/v1/hr/permissions/${identifier}/download`, '_blank');
-                    }}
-                    className="flex items-center gap-1.5 bg-blue-950/60 hover:bg-blue-900 border border-blue-800 text-blue-400 text-xs font-bold px-3 py-1.5 rounded-lg transition"
-                  >
-                    <FileText className="w-3.5 h-3.5 text-blue-400" />
-                    Descargar PDF Firmado
-                  </button>
-                )}
-
-                {/* 3. Aprobación / Estado */}
-                {p.status === 'PENDING' ? (
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleUpdateStatus(p.id, 'APPROVED')}
-                      className="flex items-center gap-1 bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-800 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-lg transition"
-                    >
-                      <Check className="w-3.5 h-3.5" /> Aprobar
-                    </button>
-                    <button
-                      onClick={() => handleUpdateStatus(p.id, 'REJECTED')}
-                      className="flex items-center gap-1 bg-rose-950/60 hover:bg-rose-900 border border-rose-800 text-rose-400 text-xs font-bold px-3 py-1.5 rounded-lg transition"
-                    >
-                      <X className="w-3.5 h-3.5" /> Rechazar
-                    </button>
+          {filteredPermissions.map((p) => {
+            const isBusy = processingId === p.id;
+            return (
+              <div
+                key={p.id}
+                className="bg-slate-950 border border-slate-800 rounded-xl p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 hover:border-slate-700 transition"
+              >
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-bold text-white">
+                      {p.user ? `${p.user.name} ${p.user.lastName}` : 'Colaborador'}
+                    </span>
+                    <span className="text-[10px] font-mono bg-slate-800 text-slate-400 px-2 py-0.5 rounded">
+                      DNI: {p.user?.dni}
+                    </span>
+                    {p.status === 'APPROVED' && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold bg-teal-950/70 text-[#00BFA5] border border-[#00BFA5]/30 px-2 py-0.5 rounded">
+                        <CalendarCheck className="w-3 h-3" />
+                        Sincronizado en Asistencia
+                      </span>
+                    )}
                   </div>
-                ) : (
-                  <span
-                    className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                      p.status === 'APPROVED'
-                        ? 'bg-emerald-950/50 text-emerald-400 border-emerald-800/50'
-                        : 'bg-rose-950/50 text-rose-400 border-rose-800/50'
-                    }`}
-                  >
-                    {p.status === 'APPROVED' ? 'Aprobado' : 'Rechazado'}
-                  </span>
-                )}
+                  <p className="text-xs font-semibold text-[#00BFA5]">
+                    {mapTypeLabel(p.type)}
+                  </p>
+                  <p className="text-xs text-slate-400">{p.reason}</p>
+                  <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500 pt-1">
+                    <Clock className="w-3.5 h-3.5 text-slate-400" />
+                    Desde: {new Date(p.startDate).toLocaleString('es-PE')} — Hasta:{' '}
+                    {new Date(p.endDate).toLocaleString('es-PE')}
+                  </div>
+                </div>
+
+                {/* Acciones de RRHH */}
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {/* 1. Ver firma del trabajador */}
+                  {p.employeeSignature ? (
+                    <button
+                      onClick={() => setSelectedSignature(p.employeeSignature!)}
+                      className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-medium px-3 py-1.5 rounded-lg transition cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5 text-[#00BFA5]" />
+                      Ver Firma
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-slate-500 italic">Sin firma previa</span>
+                  )}
+
+                  {/* 2. Descargar PDF firmado por Camercloud */}
+                  {p.status === 'APPROVED' && (
+                    <button
+                      onClick={() => {
+                        const identifier = p.signatureCode || p.id;
+                        window.open(`/api/v1/hr/permissions/${identifier}/download`, '_blank');
+                      }}
+                      className="flex items-center gap-1.5 bg-blue-950/60 hover:bg-blue-900 border border-blue-800 text-blue-400 text-xs font-bold px-3 py-1.5 rounded-lg transition cursor-pointer"
+                    >
+                      <FileText className="w-3.5 h-3.5 text-blue-400" />
+                      PDF Firmado
+                    </button>
+                  )}
+
+                  {/* 3. Botones de Decisión para Pendientes */}
+                  {p.status === 'PENDING' ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {p.type === 'PERSONAL_PERMIT' ? (
+                        <>
+                          <button
+                            disabled={isBusy}
+                            onClick={() => handleUpdateStatus(p, 'APPROVED', true)}
+                            className="flex items-center gap-1 bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-800 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-lg transition cursor-pointer disabled:opacity-50"
+                            title="Aprobar justificando asistencia sin descuento"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            {isBusy ? 'Firmando...' : 'Aprobar (Con Goce)'}
+                          </button>
+                          <button
+                            disabled={isBusy}
+                            onClick={() => handleUpdateStatus(p, 'APPROVED', false)}
+                            className="flex items-center gap-1 bg-amber-950/60 hover:bg-amber-900 border border-amber-800 text-amber-400 text-xs font-bold px-3 py-1.5 rounded-lg transition cursor-pointer disabled:opacity-50"
+                            title="Aprobar justificando salida pero sujeto a descuento en planilla"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            Aprobar (Sin Goce)
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          disabled={isBusy}
+                          onClick={() => handleUpdateStatus(p, 'APPROVED', true)}
+                          className="flex items-center gap-1 bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-800 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-lg transition cursor-pointer disabled:opacity-50"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          {isBusy ? 'Firmando...' : 'Aprobar y Firmar'}
+                        </button>
+                      )}
+
+                      <button
+                        disabled={isBusy}
+                        onClick={() => handleUpdateStatus(p, 'REJECTED')}
+                        className="flex items-center gap-1 bg-rose-950/60 hover:bg-rose-900 border border-rose-800 text-rose-400 text-xs font-bold px-3 py-1.5 rounded-lg transition cursor-pointer disabled:opacity-50"
+                      >
+                        <X className="w-3.5 h-3.5" /> Rechazar
+                      </button>
+                    </div>
+                  ) : (
+                    <span
+                      className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                        p.status === 'APPROVED'
+                          ? 'bg-emerald-950/50 text-emerald-400 border-emerald-800/50'
+                          : 'bg-rose-950/50 text-rose-400 border-rose-800/50'
+                      }`}
+                    >
+                      {p.status === 'APPROVED' ? 'Aprobado' : 'Rechazado'}
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -345,7 +460,7 @@ export default function PermissionsPage() {
                 Registrar Solicitud de Permiso / Papeleta
               </h2>
               <p className="text-xs text-slate-400 mt-1">
-                La solicitud será auditada para descontar o justificar en el reporte de asistencia.
+                Al aprobarse, los días comprendidos se justificarán automáticamente en el Registro de Asistencia.
               </p>
             </div>
 

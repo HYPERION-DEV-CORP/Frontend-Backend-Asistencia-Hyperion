@@ -2,11 +2,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { calculateDistanceInMeters } from '@/lib/geo';
+import { calculateLunchExcessMinutes } from '@/lib/sst-monitor';
+import { assertPeriodIsOpen } from '@/lib/payroll-period';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { userId, type, actionType, lat, lng, signature, qrContent } = body; 
+    const { userId, type, actionType, lat, lng, signature, qrContent } = body;
 
     const latitude = parseFloat(lat);
     const longitude = parseFloat(lng);
@@ -34,6 +36,9 @@ export async function POST(req: NextRequest) {
         { status: 404 }
       );
     }
+
+    // 1.1. VERIFICAR QUE EL PERÍODO DE PLANILLA NO ESTÉ CERRADO
+    await assertPeriodIsOpen(today, user.companyId);
 
     // ---------------------------------------------------------
     // 2. VALIDACIÓN DE GEOCERCAS (OFICINA VS. HOME OFFICE)
@@ -151,7 +156,7 @@ export async function POST(req: NextRequest) {
         status = 'LATE';
         const expectedTime = new Date(serverTimestamp);
         expectedTime.setHours(workHour, workMin, 0, 0);
-        
+
         const diffMs = serverTimestamp.getTime() - expectedTime.getTime();
         const totalLateMinutes = Math.floor(diffMs / (1000 * 60));
 
@@ -182,7 +187,7 @@ export async function POST(req: NextRequest) {
         homeOfficeRemaining: type === 'HOME_OFFICE' ? homeOfficeRemaining : undefined,
         record,
       });
-    } 
+    }
 
     // B) INICIO DE REFRIGERIO (LUNCH_START) - VENTANA DE 1:00 PM A 1:30 PM
     else if (currentAction === 'LUNCH_START') {
@@ -227,7 +232,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // C) FIN DE REFRIGERIO (LUNCH_END) - VALIDACIÓN DE 60 MINUTOS DESDE LUNCH_START
+    // C) FIN DE REFRIGERIO (LUNCH_END) - VALIDACIÓN DE 60 MINUTOS Y CONTROL DE EXCESOS
     else if (currentAction === 'LUNCH_END') {
       if (!record || !record.lunchStart) {
         return NextResponse.json({ error: 'No ha registrado inicio de refrigerio previamente.' }, { status: 400 });
@@ -236,27 +241,47 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Ya registró fin de refrigerio el día de hoy.' }, { status: 400 });
       }
 
-      const diffMs = serverTimestamp.getTime() - record.lunchStart.getTime();
-      const lunchMinutes = Math.floor(diffMs / (1000 * 60));
+      const { totalLunchMinutes, excessMinutes } = calculateLunchExcessMinutes(
+        record.lunchStart,
+        serverTimestamp,
+        60 // 60 minutos obligatorios de refrigerio
+      );
 
-      // Contar 60 minutos obligatorios a partir de la marcación de inicio
-      if (lunchMinutes < 60) {
-        const remaining = 60 - lunchMinutes;
+      // 1. No permitir reingreso antes de cumplir los 60 minutos establecidos
+      if (totalLunchMinutes < 60) {
+        const remaining = 60 - totalLunchMinutes;
         return NextResponse.json(
           { error: `Su tiempo de refrigerio configurado es de 60 minutos (1 hora). Le faltan ${remaining} minuto(s).` },
           { status: 400 }
         );
       }
 
+      // 2. Si excedió los 60 minutos, sumar la demora a lateMinutes y registrar observación
+      const updatedLateMinutes = (record.lateMinutes || 0) + excessMinutes;
+      const updatedStatus = excessMinutes > 0 ? 'LATE' : record.status;
+      const lunchObservation =
+        excessMinutes > 0
+          ? `${record.observations ? record.observations + ' | ' : ''}Exceso refrigerio: ${totalLunchMinutes} min (+${excessMinutes} min añadidos a tardanza)`
+          : record.observations;
+
       record = await prisma.attendanceRecord.update({
         where: { id: record.id },
-        data: { lunchEnd: serverTimestamp },
+        data: {
+          lunchEnd: serverTimestamp,
+          lateMinutes: updatedLateMinutes,
+          status: updatedStatus,
+          observations: lunchObservation,
+        },
       });
 
       return NextResponse.json({
         success: true,
         action: 'LUNCH_END',
-        message: 'Fin de refrigerio registrado con éxito',
+        message:
+          excessMinutes > 0
+            ? `Fin de refrigerio registrado con ${excessMinutes} min de exceso (sumados a tardanza).`
+            : 'Fin de refrigerio registrado con éxito',
+        excessMinutes,
         record,
       });
     }
@@ -316,12 +341,11 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ error: 'Acción de marcación no válida.' }, { status: 400 });
-
   } catch (error: any) {
     console.error('❌ Error interno en la API de Marcación:', error);
     return NextResponse.json(
-      { error: 'Error interno en la marcación', details: error?.message || String(error) },
-      { status: 500 }
+      { error: error?.message || 'Error interno en la marcación' },
+      { status: error?.message?.includes('cerrado') ? 409 : 500 }
     );
   }
 }

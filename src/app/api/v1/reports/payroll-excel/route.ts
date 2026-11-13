@@ -6,11 +6,35 @@ import ExcelJS from 'exceljs';
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
+    const periodId = searchParams.get('periodId');
     const monthParam = searchParams.get('month');
     const yearParam = searchParams.get('year');
 
     let dateFilter = {};
-    if (monthParam && yearParam) {
+    let fileSuffix = `${yearParam || 'Consolidado'}_${monthParam || 'General'}`;
+
+    // 1. PRIORIDAD: Filtrar por Período de Planilla seleccionado (PayrollPeriod)
+    if (periodId) {
+      const selectedPeriod = await prisma.payrollPeriod.findUnique({
+        where: { id: periodId },
+      });
+
+      if (selectedPeriod) {
+        const endOfDay = new Date(selectedPeriod.endDate);
+        endOfDay.setUTCHours(23, 59, 59, 999);
+
+        dateFilter = {
+          date: {
+            gte: selectedPeriod.startDate,
+            lte: endOfDay,
+          },
+        };
+        // Limpiar caracteres especiales para el nombre del archivo Excel
+        fileSuffix = selectedPeriod.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+      }
+    } 
+    // 2. RESPALDO: Mantener filtro por mes y año si no se envía periodId
+    else if (monthParam && yearParam) {
       const month = parseInt(monthParam);
       const year = parseInt(yearParam);
       const startDate = new Date(year, month - 1, 1);
@@ -124,7 +148,7 @@ export async function GET(req: NextRequest) {
       status: 200,
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'Content-Disposition': `attachment; filename=Liquidacion_Planilla_HYPERION_${yearParam || 'Consolidado'}_${monthParam || 'General'}.xlsx`,
+        'Content-Disposition': `attachment; filename=Liquidacion_Planilla_HYPERION_${fileSuffix}.xlsx`,
       },
     });
   } catch (error: any) {

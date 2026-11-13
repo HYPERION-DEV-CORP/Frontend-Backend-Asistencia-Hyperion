@@ -43,6 +43,13 @@ enum PermissionType {
   COMMISSION          // Comisión de Servicio Externo
 }
 
+// 👈 PRIORIDAD 2: Estados de Periodo para Cierre de Planilla
+enum PeriodStatus {
+  OPEN
+  IN_REVIEW
+  CLOSED
+}
+
 model Company {
   id              String          @id @default(uuid())
   name            String          @default("Hyperion Digital Security S.A.C.") // Razón Social exigida por SUNAFIL
@@ -53,6 +60,7 @@ model Company {
   qrSecret        String          @default("HYPERION_QR_SECRET_KEY_2026")
   users           User[]
   payrollPolicies PayrollPolicy[]
+  payrollPeriods  PayrollPeriod[] // 👈 Relación con periodos de nómina
   createdAt       DateTime        @default(now())
 }
 
@@ -78,11 +86,13 @@ model User {
   payrollPolicyId String?
   payrollPolicy   PayrollPolicy? @relation(fields: [payrollPolicyId], references: [id])
 
-  homeAddresses      HomeAddress[]
-  attendanceRecords  AttendanceRecord[]
-  auditLogs          AuditLog[]
-  permissionsRequest PermissionRequest[]
-  digitalPaystubs    DigitalPaystub[]
+  homeAddresses       HomeAddress[]
+  attendanceRecords   AttendanceRecord[]
+  auditLogs           AuditLog[]
+  permissionsRequest  PermissionRequest[]
+  digitalPaystubs     DigitalPaystub[]
+  closedPeriods       PayrollPeriod[]      @relation("ClosedPeriods")     // 👈 Periodos cerrados por este usuario
+  rectificationAudits AttendanceAuditLog[] @relation("AdminRectifications") // 👈 Rectificaciones autorizadas por este admin
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -102,35 +112,84 @@ model HomeAddress {
 }
 
 model AttendanceRecord {
-  id                   String           @id @default(uuid())
-  userId               String
-  user                 User             @relation(fields: [userId], references: [id])
-  date                 DateTime         @db.Date
-  checkIn              DateTime?
-  lunchStart           DateTime?
-  lunchEnd             DateTime?
-  checkOut             DateTime?
-  type                 AttendanceType   @default(PRESENTIAL_QR)
-  status               AttendanceStatus @default(PRESENT)
+  id                  String           @id @default(uuid())
+  userId              String
+  user                User             @relation(fields: [userId], references: [id])
+  date                DateTime         @db.Date
+  checkIn             DateTime?
+  lunchStart          DateTime?
+  lunchEnd            DateTime?
+  checkOut            DateTime?
+  type                AttendanceType   @default(PRESENTIAL_QR)
+  status              AttendanceStatus @default(PRESENT)
 
-  lateMinutes          Int              @default(0)
+  lateMinutes         Int              @default(0)
 
   // CUMPLIMIENTO LEY N° 28999: SOBRETASAS DE HORAS EXTRAS (25% Y 35%)
-  overtimeMinutes      Int              @default(0)
-  overtime25Minutes    Int              @default(0)
-  overtime35Minutes    Int              @default(0)
-  isOvertimeApproved   Boolean          @default(false)
-  approvedBy           String?
+  overtimeMinutes     Int              @default(0)
+  overtime25Minutes   Int              @default(0)
+  overtime35Minutes   Int              @default(0)
+  isOvertimeApproved  Boolean          @default(false)
+  approvedBy          String?
 
   // TRANSPARENCIA LABORAL D.S. N° 004-2006-TR
-  isModifiedByHR       Boolean          @default(false)
-  hrModificationReason String?          @db.Text
+  isModifiedByHR       Boolean         @default(false)
+  hrModificationReason String?         @db.Text
+  documentUrl          String?         // 👈 PRIORIDAD 3: Sustento digital (comprobante/memorando)
 
   latitude             Float
   longitude            Float
   employeeSignature    String?
   observations         String?
-  createdAt            DateTime         @default(now())
+
+  auditHistory         AttendanceAuditLog[] // 👈 PRIORIDAD 3: Trazabilidad inmutable de rectificaciones
+
+  createdAt            DateTime        @default(now())
+}
+
+// 👈 PRIORIDAD 2: Entidad de Control y Cierre de Periodos de Asistencia/Nómina
+model PayrollPeriod {
+  id          String       @id @default(uuid())
+  name        String       // Ej: "Noviembre 2026 - Quincena 1"
+  startDate   DateTime     @db.Date
+  endDate     DateTime     @db.Date
+  status      PeriodStatus @default(OPEN)
+  
+  closedAt    DateTime?
+  closedById  String?
+  closedBy    User?        @relation("ClosedPeriods", fields: [closedById], references: [id])
+
+  companyId   String
+  company     Company      @relation(fields: [companyId], references: [id])
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([startDate, endDate])
+}
+
+// 👈 PRIORIDAD 3: Bitácora Inmutable de Rectificaciones de Marcaciones (Inspección SUNAFIL)
+model AttendanceAuditLog {
+  id                 String           @id @default(uuid())
+  attendanceId       String
+  attendance         AttendanceRecord @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  
+  modifiedById       String
+  modifiedBy         User             @relation("AdminRectifications", fields: [modifiedById], references: [id])
+  
+  fieldModified      String           @default("checkIn") // checkIn, lunchStart, lunchEnd, checkOut, date
+  previousValue      DateTime?
+  newValue           DateTime?
+  
+  reason             String           @db.Text // Justificación obligatoria (>10 caracteres)
+  documentUrl        String?          @db.Text // Evidencia documental escaneada o digitalizada
+  ipAddress          String?
+  userAgent          String?          @db.Text
+  
+  createdAt          DateTime         @default(now())
+
+  @@index([attendanceId])
+  @@index([modifiedById])
 }
 
 model AuditLog {
@@ -158,7 +217,7 @@ model PermissionRequest {
   approvedBy        String?
   employeeSignature String?          @db.Text // Trazo de firma táctil (PNG Base64)
   signedPdfBase64   String?          @db.Text // PDF firmado con Certificado Camercloud PAdES-B
-  signatureCode     String?          @db.Text // 👈 CÓDIGO DE FIRMA DEVUELTO POR CAMERCLOUD
+  signatureCode     String?          @db.Text // Código de firma devuelto por Camercloud
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 

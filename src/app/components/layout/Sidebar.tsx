@@ -1,6 +1,7 @@
-// src/components/layout/Sidebar.tsx
+// src/app/components/layout/Sidebar.tsx
 'use client';
 
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -61,16 +62,59 @@ const navItems: NavItem[] = [
     href: '/dashboard/digital-signature',
     icon: FileSignature,
   },
-  // Dentro de src/components/layout/Sidebar.tsx
-    {
+  {
     label: 'Políticas de Planilla',
     href: '/dashboard/policies',
     icon: SliceIcon,
-    },
+  },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const [userInfo, setUserInfo] = useState<{ name: string; role: string } | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  // Cargar datos del usuario desde localStorage para mostrarlos en el pie del sidebar
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('user');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        setUserInfo({
+          name: parsed.name || 'Panel RRHH',
+          role: parsed.role || 'ADMIN',
+        });
+      }
+    } catch {
+      // Ignorar errores de parseo
+    }
+  }, []);
+
+  // Función de Cierre de Sesión
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await fetch('/api/v1/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch (error) {
+      console.error('Error al cerrar sesión:', error);
+    } finally {
+      localStorage.removeItem('user');
+      window.location.href = '/login';
+    }
+  };
+
+  // Iniciales del usuario para el avatar
+  const initials = userInfo?.name
+    ? userInfo.name
+        .split(' ')
+        .slice(0, 2)
+        .map((n) => n[0])
+        .join('')
+        .toUpperCase()
+    : 'HR';
 
   return (
     <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col h-screen border-r border-slate-800 fixed left-0 top-0 z-40">
@@ -138,19 +182,26 @@ export default function Sidebar() {
 
       {/* FOOTER DEL MENU CON ROL Y LOGOUT */}
       <div className="p-4 border-t border-slate-800 bg-slate-950/50">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-xs font-bold text-[#00BFA5] border border-slate-700">
-              HR
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center space-x-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-full bg-slate-800 shrink-0 flex items-center justify-center text-xs font-bold text-[#00BFA5] border border-slate-700">
+              {initials}
             </div>
-            <div className="text-left">
-              <p className="text-xs font-medium text-white">Panel RRHH</p>
-              <p className="text-[10px] text-slate-500">SUNAFIL Compliant</p>
+            <div className="text-left truncate">
+              <p className="text-xs font-medium text-white truncate">
+                {userInfo?.name || 'Panel RRHH'}
+              </p>
+              <p className="text-[10px] text-[#00BFA5] font-semibold">
+                {userInfo?.role === 'ADMIN' ? 'Gerencia / Admin' : 'Recursos Humanos'}
+              </p>
             </div>
           </div>
           <button
+            type="button"
+            onClick={handleLogout}
+            disabled={loggingOut}
             title="Cerrar Sesión"
-            className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-slate-800 rounded-lg transition-colors"
+            className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-950/40 rounded-lg transition-colors shrink-0 cursor-pointer disabled:opacity-50"
           >
             <LogOut className="w-4 h-4" />
           </button>
