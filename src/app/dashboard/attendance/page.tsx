@@ -329,10 +329,11 @@ export default function HRDashboard() {
         <button
           type="button"
           onClick={() => setFilterMode(filterMode === 'PENDING_OT' ? 'ALL' : 'PENDING_OT')}
-          className={`text-left rounded-xl p-5 shadow-sm border transition cursor-pointer ${filterMode === 'PENDING_OT'
+          className={`text-left rounded-xl p-5 shadow-sm border transition cursor-pointer ${
+            filterMode === 'PENDING_OT'
               ? 'bg-amber-50 border-amber-400 ring-2 ring-amber-400/40'
               : 'bg-white border-slate-200 hover:border-amber-300'
-            }`}
+          }`}
         >
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-semibold uppercase text-slate-500">
@@ -377,20 +378,22 @@ export default function HRDashboard() {
           <button
             type="button"
             onClick={() => setFilterMode('ALL')}
-            className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${filterMode === 'ALL'
+            className={`px-3 py-1.5 rounded-md text-xs font-bold transition cursor-pointer ${
+              filterMode === 'ALL'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
-              }`}
+            }`}
           >
             Todos los Registros ({records.length})
           </button>
           <button
             type="button"
             onClick={() => setFilterMode('PENDING_OT')}
-            className={`px-3 py-1.5 rounded-md text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${filterMode === 'PENDING_OT'
+            className={`px-3 py-1.5 rounded-md text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              filterMode === 'PENDING_OT'
                 ? 'bg-amber-500 text-white shadow-sm'
                 : 'text-amber-700 hover:bg-amber-100/60'
-              }`}
+            }`}
           >
             ⏳ Por Aprobar Horas Extras ({pendingOvertimeCount})
           </button>
@@ -456,10 +459,11 @@ export default function HRDashboard() {
 
                     <td className="px-6 py-4">
                       <span
-                        className={`inline-block px-2.5 py-1 text-xs font-bold rounded-md ${rec.type === 'HOME_OFFICE'
+                        className={`inline-block px-2.5 py-1 text-xs font-bold rounded-md ${
+                          rec.type === 'HOME_OFFICE'
                             ? 'bg-purple-100 text-purple-700'
                             : 'bg-blue-100 text-blue-700'
-                          }`}
+                        }`}
                       >
                         {rec.type || 'PRESENCIAL'}
                       </span>

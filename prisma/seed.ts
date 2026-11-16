@@ -1,13 +1,16 @@
 // prisma/seed.ts
-import { PrismaClient, Role } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
 async function main() {
-  const passwordHash = await bcrypt.hash('123456', 10);
+  console.log('🌱 Iniciando población inicial de Hyperion Digital Security...');
 
-  // 1. Crear / Actualizar Empresa
+  // 1. Crear Empresa con prueba gratuita de 7 días y todos los módulos activos
+  const now = new Date();
+  const sevenDaysLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
   const company = await prisma.company.upsert({
     where: { ruc: '20608810987' },
     update: {},
@@ -17,48 +20,70 @@ async function main() {
       officeLat: -14.078775,
       officeLng: -75.751176,
       radiusM: 50.0,
-      qrSecret: 'HYPERION_QR_SECRET_KEY_2026',
+      planType: 'TRIAL',
+      subscriptionStatus: 'ACTIVE',
+      trialStartsAt: now,
+      trialEndsAt: sevenDaysLater,
+      enabledModules: [
+        'ATTENDANCE_QR',
+        'BIOMETRIC_SYNC',
+        'AUTO_ABSENCE_CRON',
+        'DIGITAL_SIGNATURE',
+        'PLAME_EXPORT',
+        'AUDIT_FORENSIC',
+      ],
     },
   });
 
-  // 2. Lista de 10 Empleados
-  const empleados = [
-    { dni: '70000001', name: 'Miguel Martin', lastName: 'Conde Garcia', jobTitle: 'Desarrollador Senior', role: Role.ADMIN },
-    { dni: '70000002', name: 'Carlos', lastName: 'Mendoza Lopez', jobTitle: 'Analista de Sistemas', role: Role.EMPLOYEE },
-    { dni: '70000003', name: 'Ana Maria', lastName: 'Torres Perez', jobTitle: 'Especialista de RRHH', role: Role.HR },
-    { dni: '70000004', name: 'Juan Carlos', lastName: 'Rios Gomez', jobTitle: 'Soporte Técnico', role: Role.EMPLOYEE },
-    { dni: '70000005', name: 'Lucia', lastName: 'Fernandez Silva', jobTitle: 'Diseñadora UX', role: Role.EMPLOYEE },
-    { dni: '70000006', name: 'Roberto', lastName: 'Vargas Diaz', jobTitle: 'Supervisor de Seguridad', role: Role.EMPLOYEE },
-    { dni: '70000007', name: 'Sofia', lastName: 'Castro Morales', jobTitle: 'Contadora', role: Role.EMPLOYEE },
-    { dni: '70000008', name: 'Diego', lastName: 'Espinoza Paredes', jobTitle: 'Ingeniero de Redes', role: Role.EMPLOYEE },
-    { dni: '70000009', name: 'Elena', lastName: 'Navarro Ruiz', jobTitle: 'Asistente Administrativo', role: Role.EMPLOYEE },
-    { dni: '70000010', name: 'Fernando', lastName: 'Soto Medina', jobTitle: 'Gerente de Operaciones', role: Role.EMPLOYEE },
-  ];
+  // 2. Crear Régimen Laboral General 728 por defecto
+  const policy728 = await prisma.payrollPolicy.create({
+    data: {
+      name: 'Régimen General 728',
+      daysInMonth: 30,
+      hoursPerDay: 8.0,
+      overtimeFirst2HoursRate: 1.25,
+      overtimeNextHoursRate: 1.35,
+      companyId: company.id,
+    },
+  });
 
-  for (const emp of empleados) {
-    await prisma.user.upsert({
-      where: { dni: emp.dni },
-      update: {},
-      create: {
-        dni: emp.dni,
-        name: emp.name,
-        lastName: emp.lastName,
-        email: `usuario_${emp.dni}@hyperion.pe`,
-        passwordHash,
-        role: emp.role,
-        jobTitle: emp.jobTitle,
-        workStartTime: '09:00',
-        toleranceMinutes: 10,
-        homeOfficeQuota: 4, // 4 días de Home Office por defecto
-        baseSalary: 2500.0,
-        companyId: company.id,
-      },
-    });
-  }
+  // 3. Crear Usuario Administrador Principal (vinculado al biométrico EnNo 00000004)
+  const passwordHash = await bcrypt.hash('Admin2026*', 10);
 
-  console.log('✅ Empresa y 10 usuarios sembrados correctamente. Contraseña por defecto: 123456');
+  const admin = await prisma.user.upsert({
+    where: { email: 'admin@hyperion.pe' },
+    update: {},
+    create: {
+      dni: '70000001',
+      docType: 'DNI',
+      biometricCode: '00000004',
+      name: 'Miguel Martin',
+      lastName: 'Conde Garcia',
+      email: 'admin@hyperion.pe',
+      passwordHash,
+      role: 'ADMIN',
+      jobTitle: 'Gerencia / Admin',
+      isActive: true,
+      workStartTime: '09:00',
+      toleranceMinutes: 10,
+      baseSalary: 2500.0,
+      companyId: company.id,
+      payrollPolicyId: policy728.id,
+    },
+  });
+
+  console.log('✅ Base de datos lista.');
+  console.log('-------------------------------------------');
+  console.log('📧 Correo:     admin@hyperion.pe');
+  console.log('🔑 Contraseña: Admin2026*');
+  console.log('-------------------------------------------');
 }
 
 main()
-  .catch((e) => console.error(e))
-  .finally(async () => await prisma.$disconnect());
+  .catch((e) => {
+    console.error('❌ Error en seed:', e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

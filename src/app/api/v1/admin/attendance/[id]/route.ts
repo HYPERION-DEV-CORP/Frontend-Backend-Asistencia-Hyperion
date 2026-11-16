@@ -1,19 +1,22 @@
 // src/app/api/v1/admin/attendance/[id]/route.ts
-import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
-import { assertPeriodIsOpen } from '@/lib/payroll-period';
-import { calculateLunchExcessMinutes } from '@/lib/sst-monitor';
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { assertPeriodIsOpen } from "@/lib/payroll-period";
+import { calculateLunchExcessMinutes } from "@/lib/sst-monitor";
 
 export async function PUT(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string }> | { id: string } }
+  { params }: { params: Promise<{ id: string }> | { id: string } },
 ) {
   try {
     const resolvedParams = await params;
     const recordId = resolvedParams?.id;
 
     if (!recordId) {
-      return NextResponse.json({ error: 'ID de registro no recibido' }, { status: 400 });
+      return NextResponse.json(
+        { error: "ID de registro no recibido" },
+        { status: 400 },
+      );
     }
 
     const body = await req.json();
@@ -30,15 +33,21 @@ export async function PUT(
     // 1. Validación de motivo exigido por SUNAFIL
     if (!reason || !reason.trim() || reason.trim().length < 10) {
       return NextResponse.json(
-        { error: 'SUNAFIL exige un motivo justificado (mínimo 10 caracteres) para la rectificación manual.' },
-        { status: 400 }
+        {
+          error:
+            "SUNAFIL exige un motivo justificado (mínimo 10 caracteres) para la rectificación manual.",
+        },
+        { status: 400 },
       );
     }
 
     if (!adminId) {
       return NextResponse.json(
-        { error: 'Se requiere el ID del administrador que autoriza la modificación.' },
-        { status: 401 }
+        {
+          error:
+            "Se requiere el ID del administrador que autoriza la modificación.",
+        },
+        { status: 401 },
       );
     }
 
@@ -53,61 +62,106 @@ export async function PUT(
     });
 
     if (!rawRecord || !rawRecord.user) {
-      return NextResponse.json({ error: 'Registro de asistencia no encontrado' }, { status: 404 });
+      return NextResponse.json(
+        { error: "Registro de asistencia no encontrado" },
+        { status: 404 },
+      );
     }
 
     const record = rawRecord as typeof rawRecord & { user: any };
     const user = record.user;
 
     // 3. Bloqueo de Periodos Cerrados
-    // Verifica que la fecha de la marcación no esté dentro de un periodo cerrado para la empresa
     await assertPeriodIsOpen(record.date, user.companyId);
+
+    // 3.1. Bloquear edición si existe una papeleta aprobada SIN GOCE que afecte la jornada de ese día
+    // (Se excluye únicamente el día de cierre cuando el permiso termina en o antes del inicio del turno, ej. 09:00 a. m.)
+    const recordDateStr = new Date(record.date).toISOString().split("T")[0];
+    const [wH, wM] = (user.workStartTime || "09:00").split(":").map(Number);
+    const userHoursPerDay = user.payrollPolicy?.hoursPerDay || 8.0;
+
+    // Inicio y fin del turno en hora Perú (UTC-5 -> +5h en UTC)
+    const shiftStartUtc = new Date(
+      `${recordDateStr}T${String(wH).padStart(2, "0")}:${String(wM).padStart(2, "0")}:00.000Z`,
+    );
+    shiftStartUtc.setUTCHours(shiftStartUtc.getUTCHours() + 5);
+
+    const shiftEndUtc = new Date(
+      shiftStartUtc.getTime() + (userHoursPerDay + 1.0) * 60 * 60 * 1000,
+    );
+
+    const activeUnpaidPermit = await prisma.permissionRequest.findFirst({
+      where: {
+        userId: record.userId,
+        status: "APPROVED",
+        reason: { contains: "SIN GOCE", mode: "insensitive" },
+        // La papeleta empieza antes de que termine el turno de este día
+        startDate: { lt: shiftEndUtc },
+        // Y termina DESPUÉS de que inicie el turno de este día (si termina a las 09:00 a. m. del 17/11, NO bloquea el 17/11)
+        endDate: { gt: shiftStartUtc },
+      },
+    });
+
+    if (activeUnpaidPermit) {
+      return NextResponse.json(
+        {
+          error:
+            "Este día está cubierto por una Papeleta aprobada SIN GOCE DE HABER. No se pueden modificar ni asignar horas trabajadas sobre una licencia sin goce.",
+        },
+        { status: 409 },
+      );
+    }
 
     const dateObj = new Date(record.date);
     const year = dateObj.getFullYear();
-    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-    const day = String(dateObj.getDate()).padStart(2, '0');
+    const month = String(dateObj.getMonth() + 1).padStart(2, "0");
+    const day = String(dateObj.getDate()).padStart(2, "0");
     const dateStr = `${year}-${month}-${day}`;
 
     // 4. Reconstrucción de Fechas
     let updatedCheckIn = record.checkIn;
-    if (newCheckIn && newCheckIn.includes(':')) {
+    if (newCheckIn && newCheckIn.includes(":")) {
       updatedCheckIn = new Date(`${dateStr}T${newCheckIn}:00.000`);
     }
 
     let updatedLunchStart = record.lunchStart;
-    if (newLunchStart && newLunchStart.includes(':')) {
+    if (newLunchStart && newLunchStart.includes(":")) {
       updatedLunchStart = new Date(`${dateStr}T${newLunchStart}:00.000`);
     }
 
     let updatedLunchEnd = record.lunchEnd;
-    if (newLunchEnd && newLunchEnd.includes(':')) {
+    if (newLunchEnd && newLunchEnd.includes(":")) {
       updatedLunchEnd = new Date(`${dateStr}T${newLunchEnd}:00.000`);
     }
 
     let updatedCheckOut = record.checkOut;
-    if (newCheckOut && newCheckOut.includes(':')) {
+    if (newCheckOut && newCheckOut.includes(":")) {
       updatedCheckOut = new Date(`${dateStr}T${newCheckOut}:00.000`);
     }
 
     // 5. Cálculo de Tardanza por Ingreso
     let lateMinutes = 0;
-    let status: 'PRESENT' | 'LATE' = 'PRESENT';
+    let status: "PRESENT" | "LATE" = "PRESENT";
 
     if (updatedCheckIn && user.workStartTime) {
-      const [startHours, startMinutes] = user.workStartTime.split(':').map(Number);
+      const [startHours, startMinutes] = user.workStartTime
+        .split(":")
+        .map(Number);
       const expectedStartTime = new Date(
-        `${dateStr}T${String(startHours).padStart(2, '0')}:${String(startMinutes).padStart(2, '0')}:00.000`
+        `${dateStr}T${String(startHours).padStart(2, "0")}:${String(startMinutes).padStart(2, "0")}:00.000`,
       );
       const graceLimitTime = new Date(
-        expectedStartTime.getTime() + (user.toleranceMinutes || 10) * 60 * 1000
+        expectedStartTime.getTime() + (user.toleranceMinutes || 10) * 60 * 1000,
       );
 
       if (updatedCheckIn > graceLimitTime) {
-        status = 'LATE';
+        status = "LATE";
         const diffMs = updatedCheckIn.getTime() - expectedStartTime.getTime();
         const totalLateMinutes = Math.floor(diffMs / (1000 * 60));
-        lateMinutes = Math.max(0, totalLateMinutes - (user.toleranceMinutes || 10));
+        lateMinutes = Math.max(
+          0,
+          totalLateMinutes - (user.toleranceMinutes || 10),
+        );
       }
     }
 
@@ -115,18 +169,18 @@ export async function PUT(
     const { totalLunchMinutes, excessMinutes } = calculateLunchExcessMinutes(
       updatedLunchStart,
       updatedLunchEnd,
-      60 // 60 minutos permitidos según tu cálculo de jornada (totalShiftHours = userHoursPerDay + 1.0)
+      60,
     );
 
     if (excessMinutes > 0) {
       lateMinutes += excessMinutes;
-      status = 'LATE';
+      status = "LATE";
     }
 
     const lunchNote =
       excessMinutes > 0
         ? ` | Exceso refrigerio: ${totalLunchMinutes} min (+${excessMinutes} min añadidos a tardanza)`
-        : '';
+        : "";
 
     // 6. Cálculo de Horas Extras (25% y 35%)
     let totalOvertimeMinutes = 0;
@@ -134,15 +188,14 @@ export async function PUT(
     let overtime35Minutes = 0;
 
     if (updatedCheckOut && user.workStartTime) {
-      const [workHour, workMin] = user.workStartTime.split(':').map(Number);
-      const userHoursPerDay = user.payrollPolicy?.hoursPerDay || 8.0;
-      const totalShiftHours = userHoursPerDay + 1.0; // Jornada + 1h de refrigerio
+      const [workHour, workMin] = user.workStartTime.split(":").map(Number);
+      const totalShiftHours = userHoursPerDay + 1.0;
 
       const officialCheckOut = new Date(
         new Date(
-          `${dateStr}T${String(workHour).padStart(2, '0')}:${String(workMin).padStart(2, '0')}:00.000`
+          `${dateStr}T${String(workHour).padStart(2, "0")}:${String(workMin).padStart(2, "0")}:00.000`,
         ).getTime() +
-          totalShiftHours * 60 * 60 * 1000
+          totalShiftHours * 60 * 60 * 1000,
       );
 
       if (updatedCheckOut > officialCheckOut) {
@@ -153,16 +206,18 @@ export async function PUT(
       }
     }
 
-    // Si cambió la hora de salida, las nuevas horas extras vuelven a estado pendiente de aprobación
-    const checkOutChanged = record.checkOut?.getTime() !== updatedCheckOut?.getTime();
-    const isOvertimeApproved = checkOutChanged ? false : record.isOvertimeApproved;
+    const checkOutChanged =
+      record.checkOut?.getTime() !== updatedCheckOut?.getTime();
+    const isOvertimeApproved = checkOutChanged
+      ? false
+      : record.isOvertimeApproved;
 
     // Captura de metadatos forenses
     const ipAddress =
-      req.headers.get('x-forwarded-for')?.split(',')[0] ||
-      req.headers.get('x-real-ip') ||
-      '127.0.0.1';
-    const userAgent = req.headers.get('user-agent') || 'Desconocido';
+      req.headers.get("x-forwarded-for")?.split(",")[0] ||
+      req.headers.get("x-real-ip") ||
+      "127.0.0.1";
+    const userAgent = req.headers.get("user-agent") || "Desconocido";
 
     // 7. Transacción atómica: Actualización de marcación + Logs de auditoría
     const result = await prisma.$transaction(async (tx) => {
@@ -186,7 +241,6 @@ export async function PUT(
         },
       });
 
-      // Detalle campo por campo en AttendanceAuditLog (incluyendo refrigerios)
       const auditEntries: Array<{
         attendanceId: string;
         modifiedById: string;
@@ -203,7 +257,7 @@ export async function PUT(
         auditEntries.push({
           attendanceId: recordId,
           modifiedById: adminId,
-          fieldModified: 'checkIn',
+          fieldModified: "checkIn",
           previousValue: record.checkIn,
           newValue: updatedCheckIn,
           reason: reason.trim(),
@@ -217,7 +271,7 @@ export async function PUT(
         auditEntries.push({
           attendanceId: recordId,
           modifiedById: adminId,
-          fieldModified: 'lunchStart',
+          fieldModified: "lunchStart",
           previousValue: record.lunchStart,
           newValue: updatedLunchStart,
           reason: reason.trim(),
@@ -231,7 +285,7 @@ export async function PUT(
         auditEntries.push({
           attendanceId: recordId,
           modifiedById: adminId,
-          fieldModified: 'lunchEnd',
+          fieldModified: "lunchEnd",
           previousValue: record.lunchEnd,
           newValue: updatedLunchEnd,
           reason: reason.trim(),
@@ -245,7 +299,7 @@ export async function PUT(
         auditEntries.push({
           attendanceId: recordId,
           modifiedById: adminId,
-          fieldModified: 'checkOut',
+          fieldModified: "checkOut",
           previousValue: record.checkOut,
           newValue: updatedCheckOut,
           reason: reason.trim(),
@@ -261,13 +315,12 @@ export async function PUT(
         });
       }
 
-      // Registro general de sistema en AuditLog
       await tx.auditLog.create({
         data: {
           performedById: adminId,
-          entity: 'ATTENDANCE_RECORD',
+          entity: "ATTENDANCE_RECORD",
           entityId: recordId,
-          action: 'RECTIFY_ATTENDANCE_AND_OVERTIME',
+          action: "RECTIFY_ATTENDANCE_AND_OVERTIME",
           previousValue: `Tardanza: ${record.lateMinutes}m, HE: ${record.overtimeMinutes}m`,
           newValue: `Tardanza: ${lateMinutes}m, HE: ${totalOvertimeMinutes}m (25%: ${overtime25Minutes}m, 35%: ${overtime35Minutes}m)`,
           reason: `${reason.trim()}${lunchNote}`,
@@ -280,14 +333,24 @@ export async function PUT(
 
     return NextResponse.json({
       success: true,
-      message: 'Marcación y Horas Extras recalculadas y auditadas exitosamente',
+      message: "Marcación y Horas Extras recalculadas y auditadas exitosamente",
       record: result,
     });
   } catch (error: any) {
-    console.error('❌ Error actualizando asistencia:', error);
+    console.error("❌ Error actualizando asistencia:", error);
     return NextResponse.json(
-      { error: error.message || 'Error interno del servidor al procesar rectificación' },
-      { status: error.message?.includes('cerrado') ? 409 : 500 }
+      {
+        error:
+          error.message ||
+          "Error interno del servidor al procesar rectificación",
+      },
+      {
+        status:
+          error.message?.includes("cerrado") ||
+          error.message?.includes("bloqueado")
+            ? 409
+            : 500,
+      },
     );
   }
 }

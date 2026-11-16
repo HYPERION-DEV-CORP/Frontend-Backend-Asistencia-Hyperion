@@ -43,37 +43,64 @@ enum PermissionType {
   COMMISSION          // Comisión de Servicio Externo
 }
 
-// 👈 PRIORIDAD 2: Estados de Periodo para Cierre de Planilla
 enum PeriodStatus {
   OPEN
   IN_REVIEW
   CLOSED
 }
 
+enum SubscriptionPlan {
+  TRIAL
+  BASIC
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+}
+
 model Company {
-  id              String          @id @default(uuid())
-  name            String          @default("Hyperion Digital Security S.A.C.") // Razón Social exigida por SUNAFIL
-  ruc             String          @unique @default("20608810987")             // RUC de 11 dígitos obligatorio
-  officeLat       Float           @default(-14.078775)
-  officeLng       Float           @default(-75.751176)
-  radiusM         Float           @default(30.0)
-  qrSecret        String          @default("HYPERION_QR_SECRET_KEY_2026")
-  users           User[]
-  payrollPolicies PayrollPolicy[]
-  payrollPeriods  PayrollPeriod[] // 👈 Relación con periodos de nómina
-  createdAt       DateTime        @default(now())
+  id                 String             @id @default(uuid())
+  name               String             @default("Hyperion Digital Security S.A.C.") // Razón Social exigida por SUNAFIL
+  ruc                String             @unique @default("20608810987")             // RUC de 11 dígitos obligatorio
+  officeLat          Float              @default(-14.078775)
+  officeLng          Float              @default(-75.751176)
+  radiusM            Float              @default(30.0)
+  qrSecret           String             @default("HYPERION_QR_SECRET_KEY_2026")
+
+  // CONTROL DE PRUEBA GRATUITA (7 DÍAS) Y SUSCRIPCIÓN
+  planType           SubscriptionPlan   @default(TRIAL)
+  subscriptionStatus SubscriptionStatus @default(ACTIVE)
+  trialStartsAt      DateTime           @default(now())
+  trialEndsAt        DateTime?
+
+  // MÓDULOS ACTIVABLES / DESACTIVABLES POR EMPRESA (FEATURE FLAGS)
+  // Valores soportados: "ATTENDANCE_QR", "BIOMETRIC_SYNC", "AUTO_ABSENCE_CRON",
+  // "DIGITAL_SIGNATURE", "PLAME_EXPORT", "AUDIT_FORENSIC"
+  enabledModules     String[]           @default(["ATTENDANCE_QR", "AUTO_ABSENCE_CRON", "PLAME_EXPORT", "AUDIT_FORENSIC"])
+
+  users              User[]
+  payrollPolicies    PayrollPolicy[]
+  payrollPeriods     PayrollPeriod[]
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
 }
 
 model User {
   id               String   @id @default(uuid())
   dni              String   @unique
   docType          String   @default("DNI")
+  biometricCode    String?  @unique // Código EnNo del reloj biométrico (Ej: "00000004")
   name             String
   lastName         String
   email            String   @unique
   passwordHash     String
   role             Role     @default(EMPLOYEE)
   jobTitle         String
+  isActive         Boolean  @default(true)
   workStartTime    String   @default("09:00")
   toleranceMinutes Int      @default(10)
   homeOfficeQuota  Int      @default(4)
@@ -91,8 +118,8 @@ model User {
   auditLogs           AuditLog[]
   permissionsRequest  PermissionRequest[]
   digitalPaystubs     DigitalPaystub[]
-  closedPeriods       PayrollPeriod[]      @relation("ClosedPeriods")     // 👈 Periodos cerrados por este usuario
-  rectificationAudits AttendanceAuditLog[] @relation("AdminRectifications") // 👈 Rectificaciones autorizadas por este admin
+  closedPeriods       PayrollPeriod[]      @relation("ClosedPeriods")
+  rectificationAudits AttendanceAuditLog[] @relation("AdminRectifications")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -112,49 +139,50 @@ model HomeAddress {
 }
 
 model AttendanceRecord {
-  id                  String           @id @default(uuid())
-  userId              String
-  user                User             @relation(fields: [userId], references: [id])
-  date                DateTime         @db.Date
-  checkIn             DateTime?
-  lunchStart          DateTime?
-  lunchEnd            DateTime?
-  checkOut            DateTime?
-  type                AttendanceType   @default(PRESENTIAL_QR)
-  status              AttendanceStatus @default(PRESENT)
+  id                   String           @id @default(uuid())
+  userId               String
+  user                 User             @relation(fields: [userId], references: [id])
+  date                 DateTime         @db.Date
+  checkIn              DateTime?
+  lunchStart           DateTime?
+  lunchEnd             DateTime?
+  checkOut             DateTime?
+  type                 AttendanceType   @default(PRESENTIAL_QR)
+  status               AttendanceStatus @default(PRESENT)
 
-  lateMinutes         Int              @default(0)
+  lateMinutes          Int              @default(0)
 
   // CUMPLIMIENTO LEY N° 28999: SOBRETASAS DE HORAS EXTRAS (25% Y 35%)
-  overtimeMinutes     Int              @default(0)
-  overtime25Minutes   Int              @default(0)
-  overtime35Minutes   Int              @default(0)
-  isOvertimeApproved  Boolean          @default(false)
-  approvedBy          String?
+  overtimeMinutes      Int              @default(0)
+  overtime25Minutes    Int              @default(0)
+  overtime35Minutes    Int              @default(0)
+  isOvertimeApproved   Boolean          @default(false)
+  approvedBy           String?
 
   // TRANSPARENCIA LABORAL D.S. N° 004-2006-TR
-  isModifiedByHR       Boolean         @default(false)
-  hrModificationReason String?         @db.Text
-  documentUrl          String?         // 👈 PRIORIDAD 3: Sustento digital (comprobante/memorando)
+  isModifiedByHR       Boolean          @default(false)
+  hrModificationReason String?          @db.Text
+  documentUrl          String?
 
-  latitude             Float
-  longitude            Float
+  latitude             Float            @default(-14.078775)
+  longitude            Float            @default(-75.751176)
   employeeSignature    String?
   observations         String?
 
-  auditHistory         AttendanceAuditLog[] // 👈 PRIORIDAD 3: Trazabilidad inmutable de rectificaciones
+  auditHistory         AttendanceAuditLog[]
 
-  createdAt            DateTime        @default(now())
+  createdAt            DateTime         @default(now())
+
+  @@unique([userId, date])
 }
 
-// 👈 PRIORIDAD 2: Entidad de Control y Cierre de Periodos de Asistencia/Nómina
 model PayrollPeriod {
   id          String       @id @default(uuid())
-  name        String       // Ej: "Noviembre 2026 - Quincena 1"
+  name        String
   startDate   DateTime     @db.Date
   endDate     DateTime     @db.Date
   status      PeriodStatus @default(OPEN)
-  
+
   closedAt    DateTime?
   closedById  String?
   closedBy    User?        @relation("ClosedPeriods", fields: [closedById], references: [id])
@@ -168,25 +196,24 @@ model PayrollPeriod {
   @@index([startDate, endDate])
 }
 
-// 👈 PRIORIDAD 3: Bitácora Inmutable de Rectificaciones de Marcaciones (Inspección SUNAFIL)
 model AttendanceAuditLog {
-  id                 String           @id @default(uuid())
-  attendanceId       String
-  attendance         AttendanceRecord @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
-  
-  modifiedById       String
-  modifiedBy         User             @relation("AdminRectifications", fields: [modifiedById], references: [id])
-  
-  fieldModified      String           @default("checkIn") // checkIn, lunchStart, lunchEnd, checkOut, date
-  previousValue      DateTime?
-  newValue           DateTime?
-  
-  reason             String           @db.Text // Justificación obligatoria (>10 caracteres)
-  documentUrl        String?          @db.Text // Evidencia documental escaneada o digitalizada
-  ipAddress          String?
-  userAgent          String?          @db.Text
-  
-  createdAt          DateTime         @default(now())
+  id            String           @id @default(uuid())
+  attendanceId  String
+  attendance    AttendanceRecord @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+
+  modifiedById  String
+  modifiedBy    User             @relation("AdminRectifications", fields: [modifiedById], references: [id])
+
+  fieldModified String           @default("checkIn")
+  previousValue DateTime?
+  newValue      DateTime?
+
+  reason        String           @db.Text
+  documentUrl   String?          @db.Text
+  ipAddress     String?
+  userAgent     String?          @db.Text
+
+  createdAt     DateTime         @default(now())
 
   @@index([attendanceId])
   @@index([modifiedById])
@@ -215,9 +242,9 @@ model PermissionRequest {
   endDate           DateTime
   status            PermissionStatus @default(PENDING)
   approvedBy        String?
-  employeeSignature String?          @db.Text // Trazo de firma táctil (PNG Base64)
-  signedPdfBase64   String?          @db.Text // PDF firmado con Certificado Camercloud PAdES-B
-  signatureCode     String?          @db.Text // Código de firma devuelto por Camercloud
+  employeeSignature String?          @db.Text
+  signedPdfBase64   String?          @db.Text
+  signatureCode     String?          @db.Text
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
@@ -227,11 +254,11 @@ model PermissionRequest {
 model SstRecord {
   id           String   @id @default(uuid())
   companyId    String
-  title        String   // Ej: "Capacitación Anual N° 1 - Primeros Auxilios"
-  type         String   // CAPACITACION, ENTREGA_EPP, INCIDENTE
+  title        String
+  type         String
   date         DateTime @db.Date
   participants Int      @default(0)
-  documentUrl  String?  // Evidencia PDF o Acta con Firma
+  documentUrl  String?
   createdAt    DateTime @default(now())
 }
 
@@ -239,8 +266,8 @@ model DigitalPaystub {
   id               String    @id @default(uuid())
   userId           String
   user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  period           String    // Ej: "2026-09"
-  fileUrl          String    // URL de la boleta en PDF
+  period           String
+  fileUrl          String
   isEmployerSigned Boolean   @default(false)
   isEmployeeSigned Boolean   @default(false)
   signedAt         DateTime?
@@ -250,11 +277,11 @@ model DigitalPaystub {
 model PayrollPolicy {
   id                      String   @id @default(uuid())
   name                    String   @default("Régimen General 728")
-  daysInMonth             Int      @default(30)   // Divisor de días laborables (30)
-  hoursPerDay             Float    @default(8.0)  // Horas por jornada ordinaria (8)
+  daysInMonth             Int      @default(30)
+  hoursPerDay             Float    @default(8.0)
 
-  overtimeFirst2HoursRate Float    @default(1.25) // Recargo primer tramo (25%)
-  overtimeNextHoursRate   Float    @default(1.35) // Recargo segundo tramo (35%)
+  overtimeFirst2HoursRate Float    @default(1.25)
+  overtimeNextHoursRate   Float    @default(1.35)
 
   companyId               String
   company                 Company  @relation(fields: [companyId], references: [id])

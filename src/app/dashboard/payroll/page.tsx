@@ -13,9 +13,11 @@ interface PayrollItem {
   baseSalary: number;
   hourlyRate: number;
   totalLateMinutes: number;
+  unpaidLeaveMinutes: number;
   totalOvertime25Minutes: number;
   totalOvertime35Minutes: number;
   lateDiscount: number;
+  unpaidLeaveDiscount: number;
   totalOvertimePay: number;
   netSalary: number;
 }
@@ -39,39 +41,52 @@ export default function PayrollPage() {
   const [newPeriod, setNewPeriod] = useState({ name: '', startDate: '', endDate: '' });
   const [periodLoading, setPeriodLoading] = useState(false);
 
-  const fetchPeriods = async () => {
+  const fetchPayroll = async (periodId?: string) => {
+    setLoading(true);
     try {
-      const res = await fetch('/api/v1/hr/payroll/periods');
-      const data = await res.json();
-      if (data.success && data.periods.length > 0) {
-        setPeriods(data.periods);
-        if (!selectedPeriodId) {
-          setSelectedPeriodId(data.periods[0].id);
-        }
+      const query = periodId ? `?periodId=${periodId}` : '';
+      const res = await fetch(`/api/v1/hr/payroll${query}`);
+      const text = await res.text();
+      if (!res.ok || !text) {
+        setPayroll([]);
+        return;
       }
+      const data = JSON.parse(text);
+      setPayroll(data.payroll || []);
     } catch (err) {
-      console.error('Error al cargar periodos:', err);
+      console.error('Error al cargar nómina:', err);
+      setPayroll([]);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const fetchPayroll = (periodId?: string) => {
-    setLoading(true);
-    const query = periodId ? `?periodId=${periodId}` : '';
-    fetch(`/api/v1/hr/payroll${query}`)
-      .then((res) => res.json())
-      .then((data) => {
-        setPayroll(data.payroll || []);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error('Error al cargar nómina:', err);
-        setLoading(false);
-      });
+  const fetchPeriods = async () => {
+    try {
+      const res = await fetch('/api/v1/hr/payroll/periods');
+      const text = await res.text();
+      if (!res.ok || !text) {
+        console.warn('Respuesta vacía o error en /api/v1/hr/payroll/periods:', res.status);
+        fetchPayroll();
+        return;
+      }
+      const data = JSON.parse(text);
+      if (data.success && Array.isArray(data.periods) && data.periods.length > 0) {
+        setPeriods(data.periods);
+        const targetId = selectedPeriodId || data.periods[0].id;
+        setSelectedPeriodId(targetId);
+        fetchPayroll(targetId);
+      } else {
+        fetchPayroll();
+      }
+    } catch (err) {
+      console.error('Error al cargar periodos:', err);
+      fetchPayroll();
+    }
   };
 
   useEffect(() => {
     fetchPeriods();
-    fetchPayroll();
   }, []);
 
   const handlePeriodChange = (id: string) => {
@@ -88,16 +103,17 @@ export default function PayrollPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newPeriod),
       });
-      const data = await res.json();
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : {};
       if (res.ok) {
         setShowModalPeriod(false);
         setNewPeriod({ name: '', startDate: '', endDate: '' });
         fetchPeriods();
       } else {
-        alert(data.error);
+        alert(data.error || 'Error al crear el periodo');
       }
     } catch {
-      alert('Error al crear el periodo');
+      alert('Error de conexión al crear el periodo');
     } finally {
       setPeriodLoading(false);
     }
@@ -124,8 +140,9 @@ export default function PayrollPage() {
       if (res.ok) {
         fetchPeriods();
       } else {
-        const data = await res.json();
-        alert(data.error);
+        const text = await res.text();
+        const data = text ? JSON.parse(text) : {};
+        alert(data.error || 'Error al actualizar el estado del periodo');
       }
     } catch {
       alert('Error al actualizar el estado del periodo');
@@ -244,6 +261,7 @@ export default function PayrollPage() {
               <th className="px-4 py-3">Sueldo Base</th>
               <th className="px-4 py-3">Tarifa / Hora</th>
               <th className="px-4 py-3">Tardanzas (S/)</th>
+              <th className="px-4 py-3">Permisos Sin Goce</th>
               <th className="px-4 py-3">Horas Extras (S/)</th>
               <th className="px-4 py-3 text-right">Neto a Pagar</th>
             </tr>
@@ -251,13 +269,13 @@ export default function PayrollPage() {
           <tbody className="divide-y divide-slate-800">
             {loading ? (
               <tr>
-                <td colSpan={7} className="text-center py-8 text-slate-500">
+                <td colSpan={8} className="text-center py-8 text-slate-500">
                   Calculando pre-nómina consolidada...
                 </td>
               </tr>
             ) : payroll.length === 0 ? (
               <tr>
-                <td colSpan={7} className="text-center py-8 text-slate-500">
+                <td colSpan={8} className="text-center py-8 text-slate-500">
                   No hay datos de planilla para mostrar en este periodo.
                 </td>
               </tr>
@@ -281,6 +299,16 @@ export default function PayrollPage() {
                   </td>
                   <td className="px-4 py-3 font-mono text-rose-400">
                     - S/ {item.lateDiscount?.toFixed(2)}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-amber-400">
+                    {item.unpaidLeaveDiscount > 0 ? (
+                      <div>
+                        <div>S/ {item.unpaidLeaveDiscount.toFixed(2)}</div>
+                        <div className="text-[10px] text-slate-500">({item.unpaidLeaveMinutes} min)</div>
+                      </div>
+                    ) : (
+                      <span className="text-slate-600">S/ 0.00</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 font-mono text-emerald-400">
                     + S/ {item.totalOvertimePay?.toFixed(2)}

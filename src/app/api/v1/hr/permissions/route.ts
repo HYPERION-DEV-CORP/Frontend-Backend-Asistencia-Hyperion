@@ -5,13 +5,28 @@ import { generatePermissionPdfBase64 } from '../../../../../lib/pdf-generator';
 import { CamercloudService } from '@/lib/camercloud';
 import { assertPeriodIsOpen } from '@/lib/payroll-period';
 import { AttendanceStatus, AttendanceType } from '@prisma/client';
-// Helper para generar el rango de fechas (YYYY-MM-DD UTC) entre startDate y endDate
-function getDatesInRange(start: Date, end: Date): Date[] {
+
+// Helper para generar las fechas calendario afectadas (excluyendo el día final si termina antes o justo al inicio de jornada 09:00)
+function getDatesInRange(start: Date, end: Date, workStartHour = 9, workStartMin = 0): Date[] {
   const dates: Date[] = [];
   const current = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
   const last = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()));
 
   while (current <= last) {
+    const isLastDay = current.getTime() === last.getTime();
+    const isSameDay = start.toDateString() === end.toDateString();
+
+    if (!isSameDay && isLastDay) {
+      // Verificar en hora local Perú (UTC-5) si termina antes o justo a la hora de ingreso
+      const peruEnd = new Date(end.getTime() - 5 * 60 * 60 * 1000);
+      const endMinutesOfDay = peruEnd.getUTCHours() * 60 + peruEnd.getUTCMinutes();
+      const shiftStartMinutes = workStartHour * 60 + workStartMin;
+
+      if (endMinutesOfDay <= shiftStartMinutes) {
+        break; // Termina antes o al iniciar el turno de ese último día: no afecta ese día
+      }
+    }
+
     dates.push(new Date(current));
     current.setUTCDate(current.getUTCDate() + 1);
   }
@@ -165,10 +180,17 @@ export async function PUT(req: NextRequest) {
 
     // 3. Ejecutar actualización, impacto en AttendanceRecord y AuditLog en transacción
     const updatedPermission = await prisma.$transaction(async (tx) => {
+      const goceLabel = isPaidPermit ? '[CON GOCE DE HABER]' : '[SIN GOCE DE HABER]';
+      const updatedReason =
+        status === 'APPROVED' && !permission.reason.includes('GOCE DE HABER')
+          ? `${permission.reason} ${goceLabel}`
+          : permission.reason;
+
       const updated = await tx.permissionRequest.update({
         where: { id: requestId },
         data: {
           status,
+          reason: updatedReason,
           approvedBy: approvedBy || adminId || 'RRHH Administrator',
           ...(signedPdfBase64Result && { signedPdfBase64: signedPdfBase64Result }),
           ...(signatureCodeResult && { signatureCode: signatureCodeResult }),
@@ -193,11 +215,10 @@ export async function PUT(req: NextRequest) {
           });
 
           if (existingRecord) {
-            // Actualizar registro existente eliminando tardanza y justificando el día
             await tx.attendanceRecord.update({
               where: { id: existingRecord.id },
               data: {
-                status: AttendanceStatus.PRESENT, // 👈 Usa el valor válido de tu enum (ej. PRESENT o EXCUSED/ON_LEAVE)
+                status: AttendanceStatus.PRESENT,
                 lateMinutes: 0,
                 isModifiedByHR: true,
                 hrModificationReason: obsNote,
@@ -207,13 +228,12 @@ export async function PUT(req: NextRequest) {
               },
             });
           } else {
-            // Crear registro de asistencia justificada para evitar falsa falta en planilla
             await tx.attendanceRecord.create({
               data: {
                 userId: permission.userId,
                 date: dayDate,
-                type: AttendanceType.PRESENTIAL_QR, // 👈 Valor válido confirmado en tu enum
-                status: AttendanceStatus.PRESENT,   // 👈 Evita que marque falta en planilla
+                type: AttendanceType.PRESENTIAL_QR,
+                status: AttendanceStatus.PRESENT,
                 lateMinutes: 0,
                 isModifiedByHR: true,
                 hrModificationReason: obsNote,

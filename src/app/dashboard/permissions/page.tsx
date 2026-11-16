@@ -284,6 +284,7 @@ export default function PermissionsPage() {
         <div className="grid grid-cols-1 gap-4">
           {filteredPermissions.map((p) => {
             const isBusy = processingId === p.id;
+            const isUnpaid = p.reason?.toUpperCase().includes('SIN GOCE');
             return (
               <div
                 key={p.id}
@@ -388,15 +389,28 @@ export default function PermissionsPage() {
                       </button>
                     </div>
                   ) : (
-                    <span
-                      className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                        p.status === 'APPROVED'
-                          ? 'bg-emerald-950/50 text-emerald-400 border-emerald-800/50'
-                          : 'bg-rose-950/50 text-rose-400 border-rose-800/50'
-                      }`}
-                    >
-                      {p.status === 'APPROVED' ? 'Aprobado' : 'Rechazado'}
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {p.status === 'APPROVED' && (
+                        <span
+                          className={`px-2.5 py-1 rounded-full text-[11px] font-bold border ${
+                            isUnpaid
+                              ? 'bg-amber-950/60 text-amber-400 border-amber-700/50'
+                              : 'bg-sky-950/60 text-sky-400 border-sky-700/50'
+                          }`}
+                        >
+                          {isUnpaid ? 'SIN GOCE DE HABER' : 'CON GOCE DE HABER'}
+                        </span>
+                      )}
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                          p.status === 'APPROVED'
+                            ? 'bg-emerald-950/50 text-emerald-400 border-emerald-800/50'
+                            : 'bg-rose-950/50 text-rose-400 border-rose-800/50'
+                        }`}
+                      >
+                        {p.status === 'APPROVED' ? 'Aprobado' : 'Rechazado'}
+                      </span>
+                    </div>
                   )}
                 </div>
               </div>
