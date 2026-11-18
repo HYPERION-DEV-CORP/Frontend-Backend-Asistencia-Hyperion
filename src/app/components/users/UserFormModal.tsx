@@ -18,6 +18,7 @@ export interface UserFormData {
   toleranceMinutes: number;
   homeOfficeQuota: number;
   baseSalary: number;
+  overtimeRate?: number;
   payrollPolicyId?: string;
   active?: boolean;
 }
