@@ -7,37 +7,50 @@ export async function POST(req: NextRequest) {
     // Validar token secreto si se invoca desde Cron externo
     const authHeader = req.headers.get('authorization');
     const cronSecret = process.env.CRON_SECRET;
-    if (cronSecret && authHeader && authHeader !== `Bearer ${cronSecret}`) {
+    const isExternalCron = Boolean(cronSecret && authHeader === `Bearer ${cronSecret}`);
+
+    if (cronSecret && authHeader && !isExternalCron) {
       return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
     }
 
     const body = await req.json().catch(() => ({}));
-    const { companyId, startDate: startParam, endDate: endParam, adminId } = body;
+    const {
+      companyId,
+      startDate: startParam,
+      endDate: endParam,
+      adminId,
+      includeToday = true, // Desde el panel RRHH evalúa desde el día 1 del mes hasta hoy
+    } = body;
 
-    // Por defecto evalúa los últimos 7 días hasta ayer (hora Perú)
+    // Hora actual en Perú (UTC-5)
     const nowPeru = new Date(Date.now() - 5 * 60 * 60 * 1000);
-    const todayStr = nowPeru.toISOString().split('T')[0];
-    const yesterday = new Date(`${todayStr}T00:00:00.000Z`);
-    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    const todayStr = nowPeru.toISOString().split('T')[0]; // Ej: "2026-11-17"
+    const currentMonthStartStr = `${todayStr.slice(0, 7)}-01`; // Ej: "2026-11-01"
 
-    const defaultStart = new Date(yesterday);
-    defaultStart.setUTCDate(defaultStart.getUTCDate() - 6);
+    const todayDate = new Date(`${todayStr}T00:00:00.000Z`);
+    const yesterdayDate = new Date(todayDate);
+    yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
 
-    const rangeStart = startParam ? new Date(`${startParam}T00:00:00.000Z`) : defaultStart;
-    const rangeEnd = endParam ? new Date(`${endParam}T00:00:00.000Z`) : yesterday;
+    // Por defecto: desde el 1ro del mes actual hasta hoy (o hasta ayer si es el cron de medianoche)
+    const rangeStart = startParam
+      ? new Date(`${startParam}T00:00:00.000Z`)
+      : new Date(`${currentMonthStartStr}T00:00:00.000Z`);
 
-    // Nunca marcar faltas para hoy o fechas futuras
-    const effectiveEnd = rangeEnd > yesterday ? yesterday : rangeEnd;
+    const defaultEnd = isExternalCron || !includeToday ? yesterdayDate : todayDate;
+    const rangeEnd = endParam ? new Date(`${endParam}T00:00:00.000Z`) : defaultEnd;
+
+    // Nunca marcar faltas para fechas futuras (mañana en adelante)
+    const effectiveEnd = rangeEnd > todayDate ? todayDate : rangeEnd;
 
     if (rangeStart > effectiveEnd) {
       return NextResponse.json({
         success: true,
         createdAbsences: 0,
-        message: 'No hay días pasados pendientes por auditar en el rango.',
+        message: 'No hay días pendientes por auditar en el rango seleccionado.',
       });
     }
 
-    // Obtener empresas con el módulo AUTO_ABSENCE_CRON habilitado y suscripción activa
+    // Obtener empresas activas con el módulo AUTO_ABSENCE_CRON habilitado
     const companies = await prisma.company.findMany({
       where: {
         ...(companyId ? { id: companyId } : {}),
@@ -46,7 +59,10 @@ export async function POST(req: NextRequest) {
       },
       include: {
         users: {
-          where: { isActive: true, role: { not: 'ADMIN' } },
+          where: {
+            isActive: true,
+            isSubjectToSupervision: true,
+          },
         },
       },
     });
@@ -58,12 +74,12 @@ export async function POST(req: NextRequest) {
         const cursor = new Date(rangeStart);
 
         while (cursor <= effectiveEnd) {
-          const dayOfWeek = cursor.getUTCDay(); // 0 = Domingo
+          const dayOfWeek = cursor.getUTCDay(); // 0 = Domingo, 6 = Sábado
           const cursorStr = cursor.toISOString().split('T')[0];
 
-          // Omitir domingos (día de descanso semanal obligatorio)
+          // EXONERACIÓN TOTAL DE DOMINGOS (Descanso semanal obligatorio)
           if (dayOfWeek !== 0) {
-            // 1. Verificar si el período está cerrado
+            // 1. Verificar si el período de planilla está CERRADO
             const closedPeriod = await prisma.payrollPeriod.findFirst({
               where: {
                 companyId: company.id,
@@ -74,7 +90,7 @@ export async function POST(req: NextRequest) {
             });
 
             if (!closedPeriod) {
-              // 2. Verificar si ya existe registro de asistencia ese día
+              // 2. Verificar si ya existe registro de asistencia (o si ya marcó hoy)
               const existingRecord = await prisma.attendanceRecord.findUnique({
                 where: {
                   userId_date: {
@@ -99,6 +115,7 @@ export async function POST(req: NextRequest) {
                 });
 
                 if (!approvedPermission) {
+                  const isSaturday = dayOfWeek === 6;
                   await prisma.attendanceRecord.create({
                     data: {
                       userId: user.id,
@@ -110,8 +127,9 @@ export async function POST(req: NextRequest) {
                       overtimeMinutes: 0,
                       latitude: company.officeLat,
                       longitude: company.officeLng,
-                      observations:
-                        'Falta injustificada detectada automáticamente (sin marcación ni papeleta)',
+                      observations: isSaturday
+                        ? 'Falta injustificada detectada automáticamente (Sábado 09:00 - 13:30 sin marcación ni papeleta)'
+                        : 'Falta injustificada detectada automáticamente (sin marcación ni papeleta)',
                     },
                   });
                   createdAbsences++;
@@ -132,8 +150,8 @@ export async function POST(req: NextRequest) {
           entity: 'ATTENDANCE_RECORD',
           entityId: 'AUTO_ABSENCE_BATCH',
           action: 'DETECT_UNJUSTIFIED_ABSENCES',
-          newValue: `${createdAbsences} faltas injustificadas registradas`,
-          reason: 'Ejecución de auditoría automática de inasistencias',
+          newValue: `${createdAbsences} faltas injustificadas generadas (${rangeStart.toISOString().split('T')[0]} al ${effectiveEnd.toISOString().split('T')[0]})`,
+          reason: 'Auditoría mensual de inasistencias (domingos exonerados)',
         },
       });
     }
@@ -141,7 +159,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       createdAbsences,
-      message: `Auditoría completada: ${createdAbsences} falta(s) injustificada(s) registrada(s).`,
+      message: `Auditoría del mes completada (${rangeStart.toISOString().split('T')[0]} al ${effectiveEnd.toISOString().split('T')[0]}): ${createdAbsences} falta(s) injustificada(s) registrada(s). Domingos exonerados.`,
     });
   } catch (error: any) {
     console.error('❌ Error detectando faltas automáticas:', error);

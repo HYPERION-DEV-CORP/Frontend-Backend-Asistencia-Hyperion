@@ -23,6 +23,7 @@ interface AttendanceRecord {
   isModifiedByHR: boolean;
   hrModificationReason: string | null;
   documentUrl?: string | null;
+  observations?: string | null;
 
   latitude: number;
   longitude: number;
@@ -54,11 +55,30 @@ interface Period {
   status: 'OPEN' | 'IN_REVIEW' | 'CLOSED';
 }
 
+interface UnmappedBioUser {
+  enNo: string;
+  deviceName: string;
+  count: number;
+}
+
+const getCurrentPeruMonth = () => {
+  const nowPeru = new Date(Date.now() - 5 * 60 * 60 * 1000);
+  return nowPeru.toISOString().slice(0, 7); // "YYYY-MM"
+};
+
 export default function HRDashboard() {
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [users, setUsers] = useState<UserOption[]>([]);
   const [periods, setPeriods] = useState<Period[]>([]);
+  const [enabledModules, setEnabledModules] = useState<string[]>([
+    'ATTENDANCE_QR',
+    'BIOMETRIC_SYNC',
+    'AUTO_ABSENCE_CRON',
+  ]);
+
+  // Filtros visuales de la tabla
   const [selectedUser, setSelectedUser] = useState<string>('ALL');
+  const [selectedMonth, setSelectedMonth] = useState<string>(getCurrentPeruMonth);
   const [filterMode, setFilterMode] = useState<'ALL' | 'PENDING_OT'>('ALL');
   const [loading, setLoading] = useState(true);
 
@@ -73,12 +93,41 @@ export default function HRDashboard() {
   const [documentUrl, setDocumentUrl] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const loadData = async () => {
+  // Estados para Importación Biométrica (ALOG_001.txt)
+  const [showBioModal, setShowBioModal] = useState(false);
+  const [bioFile, setBioFile] = useState<File | null>(null);
+  const [bioFilterType, setBioFilterType] = useState<'ALL' | 'SINGLE_MONTH' | 'RANGE'>('ALL');
+  const [bioStartMonth, setBioStartMonth] = useState<string>(getCurrentPeruMonth);
+  const [bioEndMonth, setBioEndMonth] = useState<string>(getCurrentPeruMonth);
+  const [bioUploading, setBioUploading] = useState(false);
+  const [unmappedBioUsers, setUnmappedBioUsers] = useState<UnmappedBioUser[]>([]);
+  const [bioMapping, setBioMapping] = useState<Record<string, string>>({});
+  const [bioSummary, setBioSummary] = useState<string | null>(null);
+
+  // Estado para Auditoría Manual de Faltas
+  const [auditingAbsences, setAuditingAbsences] = useState(false);
+
+  const loadData = async (runSilentAbsenceCheck = false) => {
     try {
-      const [resRecords, resUsers, resPeriods] = await Promise.all([
+      // Ejecución silenciosa automática de faltas 1 vez al día al abrir la vista
+      if (runSilentAbsenceCheck) {
+        const todayKey = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const lastAutoAudit = localStorage.getItem('hyperion_last_absence_audit');
+        if (lastAutoAudit !== todayKey) {
+          await fetch('/api/v1/cron/mark-absences', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          }).catch(() => null);
+          localStorage.setItem('hyperion_last_absence_audit', todayKey);
+        }
+      }
+
+      const [resRecords, resUsers, resPeriods, resSub] = await Promise.all([
         fetch('/api/v1/hr/records'),
         fetch('/api/v1/users'),
         fetch('/api/v1/hr/payroll/periods'),
+        fetch('/api/v1/admin/subscription'),
       ]);
 
       if (resRecords.ok) {
@@ -95,6 +144,13 @@ export default function HRDashboard() {
         const dataPeriods = await resPeriods.json();
         setPeriods(dataPeriods.periods || []);
       }
+
+      if (resSub.ok) {
+        const dataSub = await resSub.json();
+        if (dataSub.subscription?.enabledModules) {
+          setEnabledModules(dataSub.subscription.enabledModules);
+        }
+      }
     } catch (err) {
       console.error('Error cargando datos del dashboard:', err);
     } finally {
@@ -103,10 +159,9 @@ export default function HRDashboard() {
   };
 
   useEffect(() => {
-    loadData();
+    loadData(false);
   }, []);
 
-  // Función para determinar si una fecha cae en un periodo cerrado
   const checkIsPeriodClosed = (dateStr: string) => {
     if (!dateStr || periods.length === 0) return false;
     const target = new Date(dateStr.includes('T') ? dateStr : `${dateStr}T00:00:00`);
@@ -118,15 +173,103 @@ export default function HRDashboard() {
     });
   };
 
-  // Filtrado combinado por Empleado y por Horas Extras Pendientes
+  // Filtrado combinado: Empleado + Mes Seleccionado + Horas Extras Pendientes
   const filteredRecords = records.filter((r) => {
     const matchesUser = selectedUser === 'ALL' || r.user.dni === selectedUser;
+    const matchesMonth = !selectedMonth || r.date.startsWith(selectedMonth);
     const matchesOt =
       filterMode === 'ALL' || (r.overtimeMinutes > 0 && !r.isOvertimeApproved);
-    return matchesUser && matchesOt;
+    return matchesUser && matchesMonth && matchesOt;
   });
 
-  // Aprobar o Anular Horas Extras (Punto 3)
+  // Procesar subida del archivo biométrico ALOG_001.txt
+  const handleBiometricUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!bioFile) return;
+
+    if (bioFilterType === 'RANGE' && bioStartMonth && bioEndMonth && bioStartMonth > bioEndMonth) {
+      alert('El mes de inicio no puede ser posterior al mes de fin.');
+      return;
+    }
+
+    setBioUploading(true);
+    setBioSummary(null);
+    try {
+      const storedUser = localStorage.getItem('user');
+      const adminId = storedUser ? JSON.parse(storedUser).id : '';
+
+      const formData = new FormData();
+      formData.append('file', bioFile);
+      formData.append('filterType', bioFilterType);
+      if (bioFilterType === 'SINGLE_MONTH' && bioStartMonth) {
+        formData.append('startMonth', bioStartMonth);
+      } else if (bioFilterType === 'RANGE') {
+        if (bioStartMonth) formData.append('startMonth', bioStartMonth);
+        if (bioEndMonth) formData.append('endMonth', bioEndMonth);
+      }
+      if (adminId) formData.append('adminId', adminId);
+      if (Object.keys(bioMapping).length > 0) {
+        formData.append('mapping', JSON.stringify(bioMapping));
+      }
+
+      const res = await fetch('/api/v1/biometric/import', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'Error al importar el archivo biométrico.');
+        return;
+      }
+
+      setUnmappedBioUsers(data.unmappedUsers || []);
+      setBioSummary(
+        `Sincronización completada: ${data.importedDays} días nuevos, ${data.mergedDays} fusionados/actualizados, ${data.unchangedDays} sin cambios.`
+      );
+      await loadData(false);
+    } catch {
+      alert('Error de conexión al procesar el archivo biométrico.');
+    } finally {
+      setBioUploading(false);
+    }
+  };
+
+  // Ejecutar detección manual de faltas injustificadas
+  const handleAuditAbsences = async () => {
+    if (
+      !confirm(
+        '¿Ejecutar la auditoría de inasistencias para los días pasados sin marcación ni papeleta aprobada?'
+      )
+    ) {
+      return;
+    }
+
+    setAuditingAbsences(true);
+    try {
+      const storedUser = localStorage.getItem('user');
+      const adminId = storedUser ? JSON.parse(storedUser).id : null;
+
+      const res = await fetch('/api/v1/cron/mark-absences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminId }),
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        alert(data.message || 'Auditoría de faltas ejecutada.');
+        loadData(false);
+      } else {
+        alert(data.error || 'Error al auditar faltas.');
+      }
+    } catch {
+      alert('Error de conexión al auditar faltas.');
+    } finally {
+      setAuditingAbsences(false);
+    }
+  };
+
   const handleOvertimeDecision = async (
     record: AttendanceRecord,
     decision: 'APPROVE' | 'REJECT' | 'REVOKE'
@@ -157,7 +300,7 @@ export default function HRDashboard() {
       const data = await res.json();
 
       if (res.ok) {
-        loadData();
+        loadData(false);
       } else {
         alert(data.error || 'Error al procesar decisión de horas extras.');
       }
@@ -178,7 +321,7 @@ export default function HRDashboard() {
     window.open(`/api/v1/reports/pdf?${queryParams.toString()}`, '_blank');
   };
 
-  const extractHoursAndMinutes = (timeVal: string | null | undefined, defaultTime: string) => {
+  const extractHoursAndMinutes = (timeVal: string | null | undefined, defaultTime = '') => {
     if (!timeVal) return defaultTime;
     if (typeof timeVal === 'string' && timeVal.includes(':') && !timeVal.includes('T')) {
       const parts = timeVal.split(':');
@@ -204,13 +347,33 @@ export default function HRDashboard() {
     }
 
     setSelectedRecord(record);
+    // Solo precarga lo que ya existe en BD; si aún no marcó refrigerio o salida, quedan vacíos ('')
+    // para que el trabajador pueda marcarlos normalmente en la app móvil sin bloquear su jornada.
     setEditCheckIn(extractHoursAndMinutes(record.checkIn, '09:00'));
-    setEditLunchStart(extractHoursAndMinutes(record.lunchStart, '13:00'));
-    setEditLunchEnd(extractHoursAndMinutes(record.lunchEnd, '14:00'));
-    setEditCheckOut(extractHoursAndMinutes(record.checkOut, '18:00'));
+    setEditLunchStart(extractHoursAndMinutes(record.lunchStart, ''));
+    setEditLunchEnd(extractHoursAndMinutes(record.lunchEnd, ''));
+    setEditCheckOut(extractHoursAndMinutes(record.checkOut, ''));
     setReason('');
     setDocumentUrl(record.documentUrl || '');
     setShowEditModal(true);
+  };
+
+  // Opción rápida para días pasados donde se requiere regularizar toda la jornada completa
+  const handleRellenarJornadaCompleta = () => {
+    if (!selectedRecord) return;
+    const recordDate = new Date(
+      selectedRecord.date.includes('T') ? selectedRecord.date : `${selectedRecord.date}T00:00:00`
+    );
+    const isSaturday = recordDate.getDay() === 6;
+
+    if (!editCheckIn) setEditCheckIn('09:00');
+    if (isSaturday) {
+      if (!editCheckOut) setEditCheckOut('13:30');
+    } else {
+      if (!editLunchStart) setEditLunchStart('13:00');
+      if (!editLunchEnd) setEditLunchEnd('14:00');
+      if (!editCheckOut) setEditCheckOut('18:00');
+    }
   };
 
   const handleGuardarEdicion = async (e: React.FormEvent) => {
@@ -236,10 +399,10 @@ export default function HRDashboard() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          newCheckIn: editCheckIn,
-          newLunchStart: editLunchStart,
-          newLunchEnd: editLunchEnd,
-          newCheckOut: editCheckOut,
+          newCheckIn: editCheckIn || null,
+          newLunchStart: editLunchStart || null,
+          newLunchEnd: editLunchEnd || null,
+          newCheckOut: editCheckOut || null,
           reason: reason.trim(),
           documentUrl: documentUrl.trim() || null,
           adminId,
@@ -249,9 +412,9 @@ export default function HRDashboard() {
       const data = await res.json();
 
       if (res.ok) {
-        alert('Marcación y horas extras rectificadas y auditadas exitosamente.');
+        alert('Marcación rectificada y auditada exitosamente.');
         setShowEditModal(false);
-        loadData();
+        loadData(false);
       } else {
         alert(data.error || data.details || 'Error actualizando la marcación.');
       }
@@ -277,7 +440,8 @@ export default function HRDashboard() {
     }
   };
 
-  const pendingOvertimeCount = records.filter(
+  const monthRecords = records.filter((r) => !selectedMonth || r.date.startsWith(selectedMonth));
+  const pendingOvertimeCount = monthRecords.filter(
     (r) => r.overtimeMinutes > 0 && !r.isOvertimeApproved
   ).length;
 
@@ -290,21 +454,46 @@ export default function HRDashboard() {
             Registro Oficial de Control de Asistencia - SUNAFIL
           </h1>
           <p className="text-sm text-slate-600 font-medium mt-1">
-            {records[0]?.user?.companyName || 'HYPERION DIGITAL SECURITY S.A.C.'} | RUC: {records[0]?.user?.companyRuc || '20608810987'}
+            {records[0]?.user?.companyName || 'HYPERION DIGITAL SECURITY S.A.C.'} | RUC:{' '}
+            {records[0]?.user?.companyRuc || '20608810987'}
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          {enabledModules.includes('BIOMETRIC_SYNC') && (
+            <button
+              onClick={() => {
+                setBioFile(null);
+                setBioSummary(null);
+                setUnmappedBioUsers([]);
+                setShowBioModal(true);
+              }}
+              className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-indigo-700 transition text-sm cursor-pointer"
+            >
+              🧬 Importar Biométrico (.txt)
+            </button>
+          )}
+
+          {enabledModules.includes('AUTO_ABSENCE_CRON') && (
+            <button
+              onClick={handleAuditAbsences}
+              disabled={auditingAbsences}
+              className="flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-slate-900 transition text-sm cursor-pointer disabled:opacity-60"
+            >
+              🕵️ {auditingAbsences ? 'Auditando...' : 'Auditar Faltas'}
+            </button>
+          )}
+
           <button
             onClick={downloadPdf}
-            className="flex items-center gap-2 rounded-lg bg-rose-700 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-rose-800 transition text-sm"
+            className="flex items-center gap-2 rounded-lg bg-rose-700 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-rose-800 transition text-sm cursor-pointer"
           >
-            📄 Reporte Inalterable SUNAFIL (PDF)
+            📄 Reporte SUNAFIL (PDF)
           </button>
 
           <button
             onClick={downloadExcel}
-            className="flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-emerald-800 transition text-sm"
+            className="flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-emerald-800 transition text-sm cursor-pointer"
           >
             📊 Exportar Excel (.xlsx)
           </button>
@@ -315,17 +504,20 @@ export default function HRDashboard() {
       <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
           <span className="text-xs font-semibold uppercase text-slate-400">Total Empleados</span>
-          <p className="mt-2 text-3xl font-extrabold text-slate-800">{loading ? '...' : users.length}</p>
-        </div>
-
-        <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
-          <span className="text-xs font-semibold uppercase text-slate-400">Tardanzas Registradas</span>
-          <p className="mt-2 text-3xl font-extrabold text-red-600">
-            {records.reduce((acc, r) => acc + (r.lateMinutes > 0 ? 1 : 0), 0)}
+          <p className="mt-2 text-3xl font-extrabold text-slate-800">
+            {loading ? '...' : users.length}
           </p>
         </div>
 
-        {/* Tarjeta KPI Interactiva de Horas Extras */}
+        <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
+          <span className="text-xs font-semibold uppercase text-slate-400">
+            Tardanzas ({selectedMonth || 'Histórico'})
+          </span>
+          <p className="mt-2 text-3xl font-extrabold text-red-600">
+            {monthRecords.reduce((acc, r) => acc + (r.lateMinutes > 0 ? 1 : 0), 0)}
+          </p>
+        </div>
+
         <button
           type="button"
           onClick={() => setFilterMode(filterMode === 'PENDING_OT' ? 'ALL' : 'PENDING_OT')}
@@ -343,35 +535,66 @@ export default function HRDashboard() {
               {filterMode === 'PENDING_OT' ? 'Filtro activo' : 'Revisar →'}
             </span>
           </div>
-          <p className="mt-2 text-3xl font-extrabold text-amber-600">
-            {pendingOvertimeCount}
-          </p>
+          <p className="mt-2 text-3xl font-extrabold text-amber-600">{pendingOvertimeCount}</p>
         </button>
 
         <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
-          <span className="text-xs font-semibold uppercase text-slate-400">Ediciones Auditadas</span>
+          <span className="text-xs font-semibold uppercase text-slate-400">
+            Ediciones Auditadas
+          </span>
           <p className="mt-2 text-3xl font-extrabold text-indigo-600">
-            {records.filter((r) => r.isModifiedByHR).length}
+            {monthRecords.filter((r) => r.isModifiedByHR).length}
           </p>
         </div>
       </div>
 
-      {/* Barra de Filtro por Trabajador y Pestañas de Revisión */}
+      {/* Barra de Filtro por Mes, Trabajador y Pestañas de Revisión */}
       <div className="mb-6 flex flex-wrap items-center justify-between gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-        <div className="flex items-center gap-3">
-          <label className="text-sm font-semibold text-slate-700">Filtrar por Empleado:</label>
-          <select
-            value={selectedUser}
-            onChange={(e) => setSelectedUser(e.target.value)}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
-            <option value="ALL">-- Todos los Trabajadores ({users.length}) --</option>
-            {users.map((u) => (
-              <option key={u.id} value={u.dni}>
-                {u.name} {u.lastName} (DNI: {u.dni})
-              </option>
-            ))}
-          </select>
+        <div className="flex flex-wrap items-center gap-4">
+          {/* Selector Visual de Mes */}
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-semibold text-slate-700">Mes:</label>
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            {selectedMonth ? (
+              <button
+                type="button"
+                onClick={() => setSelectedMonth('')}
+                className="text-xs font-semibold text-indigo-600 hover:underline cursor-pointer"
+              >
+                Ver todos
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setSelectedMonth(getCurrentPeruMonth())}
+                className="text-xs font-semibold text-indigo-600 hover:underline cursor-pointer"
+              >
+                Mes actual
+              </button>
+            )}
+          </div>
+
+          {/* Selector por Trabajador */}
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-semibold text-slate-700">Empleado:</label>
+            <select
+              value={selectedUser}
+              onChange={(e) => setSelectedUser(e.target.value)}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="ALL">-- Todos ({users.length}) --</option>
+              {users.map((u) => (
+                <option key={u.id} value={u.dni}>
+                  {u.name} {u.lastName} ({u.dni})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-lg border border-slate-200">
@@ -384,7 +607,7 @@ export default function HRDashboard() {
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            Todos los Registros ({records.length})
+            Registros del Mes ({monthRecords.length})
           </button>
           <button
             type="button"
@@ -395,7 +618,7 @@ export default function HRDashboard() {
                 : 'text-amber-700 hover:bg-amber-100/60'
             }`}
           >
-            ⏳ Por Aprobar Horas Extras ({pendingOvertimeCount})
+            ⏳ Horas Extras Pendientes ({pendingOvertimeCount})
           </button>
         </div>
       </div>
@@ -407,7 +630,7 @@ export default function HRDashboard() {
             <tr>
               <th className="px-6 py-4">Fecha</th>
               <th className="px-6 py-4">Trabajador</th>
-              <th className="px-6 py-4">Método</th>
+              <th className="px-6 py-4">Método / Estado</th>
               <th className="px-6 py-4">Ingreso / Salida</th>
               <th className="px-6 py-4 text-center">Refrigerio (Ini / Fin)</th>
               <th className="px-6 py-4">Tardanza</th>
@@ -427,15 +650,19 @@ export default function HRDashboard() {
               <tr>
                 <td colSpan={9} className="px-6 py-8 text-center text-slate-400">
                   {filterMode === 'PENDING_OT'
-                    ? 'No hay horas extras pendientes de aprobación.'
-                    : 'No hay registros encontrados.'}
+                    ? 'No hay horas extras pendientes de aprobación en este mes.'
+                    : 'No hay registros encontrados para el mes o filtro seleccionado.'}
                 </td>
               </tr>
             ) : (
               filteredRecords.map((rec) => {
                 const isLocked = checkIsPeriodClosed(rec.date);
+                const isAbsent = rec.status === 'ABSENT';
                 return (
-                  <tr key={rec.id} className="hover:bg-slate-50">
+                  <tr
+                    key={rec.id}
+                    className={isAbsent ? 'bg-rose-50/50 hover:bg-rose-50' : 'hover:bg-slate-50'}
+                  >
                     <td className="px-6 py-4 font-medium text-slate-900 whitespace-nowrap">
                       {rec.date}
                       {isLocked && (
@@ -458,24 +685,40 @@ export default function HRDashboard() {
                     </td>
 
                     <td className="px-6 py-4">
-                      <span
-                        className={`inline-block px-2.5 py-1 text-xs font-bold rounded-md ${
-                          rec.type === 'HOME_OFFICE'
-                            ? 'bg-purple-100 text-purple-700'
-                            : 'bg-blue-100 text-blue-700'
-                        }`}
-                      >
-                        {rec.type || 'PRESENCIAL'}
-                      </span>
+                      {isAbsent ? (
+                        <span className="inline-block px-2.5 py-1 text-xs font-bold rounded-md bg-rose-100 text-rose-800 border border-rose-200">
+                          ✕ FALTA INJUSTIFICADA
+                        </span>
+                      ) : (
+                        <span
+                          className={`inline-block px-2.5 py-1 text-xs font-bold rounded-md ${
+                            rec.type === 'HOME_OFFICE'
+                              ? 'bg-purple-100 text-purple-700'
+                              : rec.type === 'BIOMETRIC_FINGERPRINT'
+                              ? 'bg-indigo-100 text-indigo-700'
+                              : 'bg-blue-100 text-blue-700'
+                          }`}
+                        >
+                          {rec.type || 'PRESENCIAL'}
+                        </span>
+                      )}
+                      {rec.observations && (
+                        <div
+                          className="text-[10px] text-slate-400 mt-1 max-w-[180px] truncate"
+                          title={rec.observations}
+                        >
+                          {rec.observations}
+                        </div>
+                      )}
                     </td>
 
-                    {/* INGRESO Y SALIDA OFICIAL */}
                     <td className="px-6 py-4 font-mono text-xs">
-                      <div className="font-semibold text-slate-900">IN: {formatTime(rec.checkIn)}</div>
+                      <div className="font-semibold text-slate-900">
+                        IN: {formatTime(rec.checkIn)}
+                      </div>
                       <div className="text-slate-500">OUT: {formatTime(rec.checkOut)}</div>
                     </td>
 
-                    {/* REFRIGERIO INICIO Y FIN */}
                     <td className="px-6 py-4 font-mono text-xs text-center">
                       <div className="text-amber-600 font-semibold">
                         INI: {formatTime(rec.lunchStart)}
@@ -495,7 +738,6 @@ export default function HRDashboard() {
                       )}
                     </td>
 
-                    {/* Desglose y Aprobación de Horas Extras Ley N° 28999 */}
                     <td className="px-6 py-4 font-mono text-xs">
                       {rec.overtimeMinutes > 0 ? (
                         <div className="space-y-1.5">
@@ -588,7 +830,9 @@ export default function HRDashboard() {
                         {rec.isModifiedByHR && (
                           <span
                             className="text-[10px] text-indigo-600 font-semibold bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200 cursor-help"
-                            title={`Motivo: ${rec.hrModificationReason || 'Modificado por RRHH'}${rec.documentUrl ? ` | Sustento: ${rec.documentUrl}` : ''}`}
+                            title={`Motivo: ${rec.hrModificationReason || 'Modificado por RRHH'}${
+                              rec.documentUrl ? ` | Sustento: ${rec.documentUrl}` : ''
+                            }`}
                           >
                             ✓ Auditado por RRHH
                           </span>
@@ -603,21 +847,215 @@ export default function HRDashboard() {
         </table>
       </div>
 
+      {/* Modal de Importación Biométrica ALOG_001.txt */}
+      {showBioModal && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 z-50">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
+            <h2 className="text-lg font-bold text-slate-900">
+              🧬 Importar Marcaciones del Reloj Biométrico
+            </h2>
+            <p className="text-xs text-slate-500 mt-1 mb-4">
+              Sube el archivo exportado por el dispositivo (<code>ALOG_001.txt</code>). Las
+              marcaciones se fusionan sin duplicados con las de la app móvil.
+            </p>
+
+            <form onSubmit={handleBiometricUpload} className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-slate-800 block mb-1.5">
+                  1. Seleccionar Archivo Biométrico (.txt)
+                </label>
+                <input
+                  type="file"
+                  accept=".txt,.csv"
+                  required
+                  onChange={(e) => setBioFile(e.target.files?.[0] || null)}
+                  className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-700 bg-slate-50"
+                />
+              </div>
+
+              {/* Selector de Alcance de Meses */}
+              <div>
+                <label className="text-xs font-bold text-slate-800 block mb-1.5">
+                  2. Alcance de Fechas a Procesar
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setBioFilterType('ALL')}
+                    className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                      bioFilterType === 'ALL'
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    Todo el archivo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBioFilterType('SINGLE_MONTH')}
+                    className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                      bioFilterType === 'SINGLE_MONTH'
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    Un mes específico
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBioFilterType('RANGE')}
+                    className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                      bioFilterType === 'RANGE'
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    Rango de meses
+                  </button>
+                </div>
+              </div>
+
+              {bioFilterType === 'SINGLE_MONTH' && (
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Mes a Importar
+                  </label>
+                  <input
+                    type="month"
+                    required
+                    value={bioStartMonth}
+                    onChange={(e) => setBioStartMonth(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
+                  />
+                </div>
+              )}
+
+              {bioFilterType === 'RANGE' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 block mb-1">
+                      Desde el Mes (Inicio)
+                    </label>
+                    <input
+                      type="month"
+                      required
+                      value={bioStartMonth}
+                      onChange={(e) => setBioStartMonth(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 block mb-1">
+                      Hasta el Mes (Fin)
+                    </label>
+                    <input
+                      type="month"
+                      required
+                      value={bioEndMonth}
+                      onChange={(e) => setBioEndMonth(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {bioSummary && (
+                <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-800 font-medium">
+                  ✅ {bioSummary}
+                </div>
+              )}
+
+              {unmappedBioUsers.length > 0 && (
+                <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-2.5">
+                  <p className="text-xs font-bold text-amber-900">
+                    ⚠️ Códigos del reloj sin trabajador asignado ({unmappedBioUsers.length}):
+                  </p>
+                  <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                    {unmappedBioUsers.map((u) => (
+                      <div
+                        key={u.enNo}
+                        className="flex items-center justify-between gap-2 bg-white p-2 rounded border border-amber-200 text-xs"
+                      >
+                        <div>
+                          <span className="font-mono font-bold text-slate-800">#{u.enNo}</span>{' '}
+                          <span className="text-slate-600">({u.deviceName})</span>
+                        </div>
+                        <select
+                          value={bioMapping[u.enNo] || ''}
+                          onChange={(e) =>
+                            setBioMapping({ ...bioMapping, [u.enNo]: e.target.value })
+                          }
+                          className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-800"
+                        >
+                          <option value="">-- Ignorar --</option>
+                          {users.map((usr) => (
+                            <option key={usr.id} value={usr.id}>
+                              {usr.name} {usr.lastName} ({usr.dni})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowBioModal(false)}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  Cerrar
+                </button>
+                <button
+                  type="submit"
+                  disabled={bioUploading || !bioFile}
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-md transition disabled:opacity-50"
+                >
+                  {bioUploading ? 'Procesando...' : 'Procesar Archivo'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Modal de Corrección Manual de RRHH */}
       {showEditModal && selectedRecord && (
         <div className="fixed inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 z-50">
           <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
-            <h2 className="text-lg font-bold text-slate-900">
-              Corregir Marcación de {selectedRecord.user.name}
-            </h2>
-            <p className="text-xs text-slate-500 mb-4 font-mono">
-              Fecha: {selectedRecord.date} | {selectedRecord.user.docType || 'DNI'}: {selectedRecord.user.dni}
-            </p>
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">
+                  Corregir Marcación de {selectedRecord.user.name}
+                </h2>
+                <p className="text-xs text-slate-500 mb-3 font-mono">
+                  Fecha: {selectedRecord.date} | {selectedRecord.user.docType || 'DNI'}:{' '}
+                  {selectedRecord.user.dni}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleRellenarJornadaCompleta}
+                className="text-[11px] font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-md border border-indigo-200 transition cursor-pointer whitespace-nowrap"
+                title="Completa las horas vacías con el horario estándar del día"
+              >
+                Rellenar día completo
+              </button>
+            </div>
+
+            <div className="mb-3 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-[11px] text-slate-600">
+              Deja vacíos (<code>--:--</code>) los eventos que el trabajador aún no ha marcado hoy
+              para que pueda registrarlos desde su app móvil.
+            </div>
 
             <form onSubmit={handleGuardarEdicion} className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs font-bold text-slate-800 block mb-1">Hora Ingreso</label>
+                  <label className="text-xs font-bold text-slate-800 block mb-1">
+                    Hora Ingreso *
+                  </label>
                   <input
                     type="time"
                     required
@@ -627,7 +1065,18 @@ export default function HRDashboard() {
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-slate-800 block mb-1">Hora Salida</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-bold text-slate-800">Hora Salida</label>
+                    {editCheckOut && (
+                      <button
+                        type="button"
+                        onClick={() => setEditCheckOut('')}
+                        className="text-[10px] text-rose-600 hover:underline cursor-pointer"
+                      >
+                        Limpiar
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="time"
                     className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none"
@@ -637,10 +1086,20 @@ export default function HRDashboard() {
                 </div>
               </div>
 
-              {/* Tiempos de Refrigerio */}
               <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200">
                 <div>
-                  <label className="text-xs font-bold text-amber-700 block mb-1">Inicio Refrigerio</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-bold text-amber-700">Inicio Refrigerio</label>
+                    {editLunchStart && (
+                      <button
+                        type="button"
+                        onClick={() => setEditLunchStart('')}
+                        className="text-[10px] text-rose-600 hover:underline cursor-pointer"
+                      >
+                        Limpiar
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="time"
                     className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none"
@@ -649,7 +1108,18 @@ export default function HRDashboard() {
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-emerald-700 block mb-1">Fin Refrigerio</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-bold text-emerald-700">Fin Refrigerio</label>
+                    {editLunchEnd && (
+                      <button
+                        type="button"
+                        onClick={() => setEditLunchEnd('')}
+                        className="text-[10px] text-rose-600 hover:underline cursor-pointer"
+                      >
+                        Limpiar
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="time"
                     className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none"
@@ -671,7 +1141,9 @@ export default function HRDashboard() {
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                 />
-                <span className="text-[10px] text-slate-400">Mínimo 10 caracteres obligatorios.</span>
+                <span className="text-[10px] text-slate-400">
+                  Mínimo 10 caracteres obligatorios.
+                </span>
               </div>
 
               <div>

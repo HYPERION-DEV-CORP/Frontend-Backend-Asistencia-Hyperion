@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/prisma';
 
-const DEFAULT_MAX_LUNCH_MINUTES = 45; // Mínimo legal Perú: 45 min (ajustable a 60 según política)
+const DEFAULT_MAX_LUNCH_MINUTES = 60; // Mínimo legal Perú: 45 min (ajustable a 60 según política)
 
 export function calculateLunchExcessMinutes(
   lunchStart?: Date | null,

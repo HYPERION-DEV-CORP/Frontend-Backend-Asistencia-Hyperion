@@ -28,6 +28,9 @@ export async function POST(req: NextRequest) {
     const file = formData.get('file') as File | null;
     const adminId = (formData.get('adminId') as string) || null;
     const companyIdParam = (formData.get('companyId') as string) || null;
+    const filterType = (formData.get('filterType') as string) || 'ALL'; // 'ALL' | 'SINGLE_MONTH' | 'RANGE'
+    const startMonth = (formData.get('startMonth') as string) || null; // Ej: "2026-11"
+    const endMonth = (formData.get('endMonth') as string) || null;     // Ej: "2026-12"
     const customMappingRaw = formData.get('mapping') as string | null;
     const customMapping: Record<string, string> = customMappingRaw
       ? JSON.parse(customMappingRaw)
@@ -38,6 +41,24 @@ export async function POST(req: NextRequest) {
         { error: 'No se recibió el archivo del biométrico (.txt)' },
         { status: 400 }
       );
+    }
+
+    // Calcular rango opcional de meses (si filterType === 'ALL', ambos quedan en null)
+    let minDateStr: string | null = null;
+    let maxDateStr: string | null = null;
+
+    if (filterType === 'SINGLE_MONTH' && startMonth) {
+      minDateStr = `${startMonth}-01`;
+      const [y, m] = startMonth.split('-').map(Number);
+      const lastDay = new Date(y, m, 0).getDate();
+      maxDateStr = `${startMonth}-${String(lastDay).padStart(2, '0')}`;
+    } else if (filterType === 'RANGE') {
+      if (startMonth) minDateStr = `${startMonth}-01`;
+      if (endMonth) {
+        const [y, m] = endMonth.split('-').map(Number);
+        const lastDay = new Date(y, m, 0).getDate();
+        maxDateStr = `${endMonth}-${String(lastDay).padStart(2, '0')}`;
+      }
     }
 
     // Obtener empresa y verificar que el módulo BIOMETRIC_SYNC y la suscripción estén activos
@@ -63,7 +84,7 @@ export async function POST(req: NextRequest) {
       content = new TextDecoder('utf-8').decode(bytes);
     }
 
-    // 2. Parsear líneas tabuladas
+    // 2. Parsear líneas tabuladas y aplicar filtro de rango de meses si corresponde
     const lines = content
       .split(/\r?\n/)
       .map((l) => l.trim())
@@ -82,6 +103,10 @@ export async function POST(req: NextRequest) {
       const inOut = cols[6];
       const dateTimeStr = cols[9];
 
+      const dateOnly = dateTimeStr.split(' ')[0]; // "YYYY-MM-DD"
+      if (minDateStr && dateOnly < minDateStr) continue;
+      if (maxDateStr && dateOnly > maxDateStr) continue;
+
       const isoLocal = dateTimeStr.replace(' ', 'T') + '-05:00';
       const parsedDate = new Date(isoLocal);
       if (isNaN(parsedDate.getTime())) continue;
@@ -98,7 +123,7 @@ export async function POST(req: NextRequest) {
 
     if (punches.length === 0) {
       return NextResponse.json(
-        { error: 'El archivo no contiene marcaciones válidas.' },
+        { error: 'El archivo no contiene marcaciones válidas para el periodo seleccionado.' },
         { status: 400 }
       );
     }
@@ -109,26 +134,19 @@ export async function POST(req: NextRequest) {
       include: { payrollPolicy: true },
     });
 
-    const resolveUser = (enNo: string, deviceName: string) => {
-      if (customMapping[enNo]) {
-        return users.find((u) => u.id === customMapping[enNo]) || null;
-      }
-      const normalizedEnNo = enNo.replace(/^0+/, '');
-      const byCodeOrDni = users.find(
-        (u) =>
-          u.biometricCode === enNo ||
-          u.dni === enNo ||
-          u.dni.replace(/^0+/, '') === normalizedEnNo
-      );
-      if (byCodeOrDni) return byCodeOrDni;
+    const resolveUser = (enNo: string) => {
+      const paddedEnNo = enNo.padStart(8, '0');
 
-      const cleanName = deviceName.toLowerCase().trim();
-      if (cleanName && !['tarjeta', 'prueba'].includes(cleanName)) {
-        return (
-          users.find((u) => u.name.toLowerCase().split(' ')[0] === cleanName) ||
-          null
-        );
+      if (customMapping[paddedEnNo] || customMapping[enNo]) {
+        const mappedId = customMapping[paddedEnNo] || customMapping[enNo];
+        return users.find((u) => u.id === mappedId) || null;
       }
+
+      const byCode = users.find(
+        (u) => u.biometricCode && u.biometricCode.padStart(8, '0') === paddedEnNo
+      );
+      if (byCode) return byCode;
+
       return null;
     };
 
@@ -164,7 +182,7 @@ export async function POST(req: NextRequest) {
     };
 
     for (const group of dailyGroups.values()) {
-      const user = resolveUser(group.enNo, group.deviceName);
+      const user = resolveUser(group.enNo);
 
       if (!user) {
         const existing = unmappedUsers.get(group.enNo);
@@ -179,9 +197,9 @@ export async function POST(req: NextRequest) {
       if (!user.biometricCode) {
         await prisma.user.update({
           where: { id: user.id },
-          data: { biometricCode: group.enNo },
+          data: { biometricCode: group.enNo.padStart(8, '0') },
         });
-        user.biometricCode = group.enNo;
+        user.biometricCode = group.enNo.padStart(8, '0');
       }
 
       const recordDate = new Date(`${group.dateStr}T00:00:00.000Z`);
@@ -250,13 +268,45 @@ export async function POST(req: NextRequest) {
       const finalCheckIn = pickEarliest(existingRecord?.checkIn, bioCheckIn);
       const finalCheckOut = pickEarliest(existingRecord?.checkOut, bioCheckOut);
 
-      // Idempotencia: si no hubo ningún cambio en las marcas, omitir
+      // 👉 AQUÍ VA EL CÁLCULO AUTOMÁTICO DE REFRIGERIO (13:00 A 14:00 LUNES A VIERNES)
+      const isWeekday = recordDate.getUTCDay() >= 1 && recordDate.getUTCDay() <= 5;
+      const defaultLunchStart = new Date(`${group.dateStr}T13:00:00-05:00`);
+      const defaultLunchEnd = new Date(`${group.dateStr}T14:00:00-05:00`);
+
+      let finalLunchStart = existingRecord?.lunchStart ?? null;
+      let finalLunchEnd = existingRecord?.lunchEnd ?? null;
+
+      if (
+        isWeekday &&
+        !finalLunchStart &&
+        !finalLunchEnd &&
+        finalCheckIn &&
+        finalCheckOut &&
+        finalCheckIn < defaultLunchStart &&
+        finalCheckOut > defaultLunchEnd
+      ) {
+        finalLunchStart = defaultLunchStart;
+        finalLunchEnd = defaultLunchEnd;
+      }
+
+      // Idempotencia: si no hubo ningún cambio en marcas ni refrigerio y no estaba como ABSENT, omitir
       const sameIn =
         (existingRecord?.checkIn?.getTime() ?? null) === (finalCheckIn?.getTime() ?? null);
       const sameOut =
         (existingRecord?.checkOut?.getTime() ?? null) === (finalCheckOut?.getTime() ?? null);
+      const sameLunchStart =
+        (existingRecord?.lunchStart?.getTime() ?? null) === (finalLunchStart?.getTime() ?? null);
+      const sameLunchEnd =
+        (existingRecord?.lunchEnd?.getTime() ?? null) === (finalLunchEnd?.getTime() ?? null);
 
-      if (existingRecord && sameIn && sameOut) {
+      if (
+        existingRecord &&
+        existingRecord.status !== 'ABSENT' &&
+        sameIn &&
+        sameOut &&
+        sameLunchStart &&
+        sameLunchEnd
+      ) {
         unchangedCount++;
         continue;
       }
@@ -286,12 +336,15 @@ export async function POST(req: NextRequest) {
       const hoursPerDay = user.payrollPolicy?.hoursPerDay || 8.0;
 
       if (finalCheckOut) {
+        const isSaturday = recordDate.getUTCDay() === 6;
         const expectedStart = new Date(
           `${group.dateStr}T${String(wH).padStart(2, '0')}:${String(wM).padStart(2, '0')}:00-05:00`
         );
-        const officialOut = new Date(
-          expectedStart.getTime() + (hoursPerDay + 1.0) * 3600 * 1000
-        );
+        // Sábados: 09:00 a 13:30 (4.5 horas sin refrigerio) | Lunes a Viernes: 8h + 1h refrigerio
+        const officialOut = isSaturday
+          ? new Date(expectedStart.getTime() + 4.5 * 3600 * 1000)
+          : new Date(expectedStart.getTime() + (hoursPerDay + 1.0) * 3600 * 1000);
+
         if (finalCheckOut > officialOut) {
           const rawOt = Math.floor((finalCheckOut.getTime() - officialOut.getTime()) / 60000);
           totalOvertimeMinutes = Math.max(0, rawOt - lateMinutes);
@@ -300,16 +353,23 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const traceNote = existingRecord
-        ? `Fusión App (${formatTimePeru(existingRecord.checkIn)} / ${formatTimePeru(existingRecord.checkOut)}) + Biométrico #${group.enNo} (${formatTimePeru(bioCheckIn)} / ${formatTimePeru(bioCheckOut)}) -> Aplicado: ${formatTimePeru(finalCheckIn)} / ${formatTimePeru(finalCheckOut)}`
-        : `Biométrico #${group.enNo} (${group.deviceName}): IN ${formatTimePeru(finalCheckIn)} | OUT ${formatTimePeru(finalCheckOut)}`;
+      const traceNote =
+        existingRecord && existingRecord.status !== 'ABSENT'
+          ? `Fusión App (${formatTimePeru(existingRecord.checkIn)} / ${formatTimePeru(existingRecord.checkOut)}) + Biométrico #${group.enNo} (${formatTimePeru(bioCheckIn)} / ${formatTimePeru(bioCheckOut)}) -> Aplicado: ${formatTimePeru(finalCheckIn)} / ${formatTimePeru(finalCheckOut)}`
+          : `Biométrico #${group.enNo} (${group.deviceName}): IN ${formatTimePeru(finalCheckIn)} | OUT ${formatTimePeru(finalCheckOut)}`;
 
       if (existingRecord) {
         await prisma.attendanceRecord.update({
           where: { id: existingRecord.id },
           data: {
             checkIn: finalCheckIn,
+            lunchStart: finalLunchStart,
+            lunchEnd: finalLunchEnd,
             checkOut: finalCheckOut,
+            type:
+              existingRecord.status === 'ABSENT'
+                ? 'BIOMETRIC_FINGERPRINT'
+                : existingRecord.type,
             status,
             lateMinutes,
             overtimeMinutes: totalOvertimeMinutes,
@@ -325,6 +385,8 @@ export async function POST(req: NextRequest) {
             userId: user.id,
             date: recordDate,
             checkIn: finalCheckIn,
+            lunchStart: finalLunchStart,
+            lunchEnd: finalLunchEnd,
             checkOut: finalCheckOut,
             type: 'BIOMETRIC_FINGERPRINT',
             status,
@@ -348,7 +410,7 @@ export async function POST(req: NextRequest) {
           entity: 'ATTENDANCE_RECORD',
           entityId: file.name,
           action: 'IMPORT_BIOMETRIC_ALOG',
-          newValue: `Nuevos: ${importedCount}, Fusionados con App: ${mergedCount}, Sin cambios: ${unchangedCount}`,
+          newValue: `Nuevos: ${importedCount}, Fusionados: ${mergedCount}, Sin cambios: ${unchangedCount}`,
           reason: 'Sincronización idempotente de marcaciones biométricas',
         },
       });

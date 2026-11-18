@@ -12,6 +12,9 @@ interface PayrollItem {
   regimenName: string;
   baseSalary: number;
   hourlyRate: number;
+  absenceDays: number;
+  absenceHours?: number;
+  absenceDiscount: number;
   totalLateMinutes: number;
   unpaidLeaveMinutes: number;
   totalOvertime25Minutes: number;
@@ -211,11 +214,10 @@ export default function PayrollPage() {
           {activePeriod && (
             <div className="flex items-center gap-3">
               <span
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold ${
-                  activePeriod.status === 'CLOSED'
-                    ? 'bg-rose-950/60 text-rose-400 border border-rose-800/40'
-                    : 'bg-emerald-950/60 text-[#00BFA5] border border-emerald-800/40'
-                }`}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold ${activePeriod.status === 'CLOSED'
+                  ? 'bg-rose-950/60 text-rose-400 border border-rose-800/40'
+                  : 'bg-emerald-950/60 text-[#00BFA5] border border-emerald-800/40'
+                  }`}
               >
                 {activePeriod.status === 'CLOSED' ? (
                   <>
@@ -230,11 +232,10 @@ export default function PayrollPage() {
 
               <button
                 onClick={() => handleToggleStatus(activePeriod)}
-                className={`px-3 py-1 rounded-lg font-bold text-[11px] transition border ${
-                  activePeriod.status === 'CLOSED'
-                    ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
-                    : 'bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border-rose-700/50'
-                }`}
+                className={`px-3 py-1 rounded-lg font-bold text-[11px] transition border ${activePeriod.status === 'CLOSED'
+                  ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+                  : 'bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border-rose-700/50'
+                  }`}
               >
                 {activePeriod.status === 'CLOSED' ? 'Reabrir Periodo' : 'Cerrar Periodo de Asistencia'}
               </button>
@@ -261,6 +262,7 @@ export default function PayrollPage() {
               <th className="px-4 py-3">Sueldo Base</th>
               <th className="px-4 py-3">Tarifa / Hora</th>
               <th className="px-4 py-3">Tardanzas (S/)</th>
+              <th className="px-4 py-3">Faltas (S/)</th>
               <th className="px-4 py-3">Permisos Sin Goce</th>
               <th className="px-4 py-3">Horas Extras (S/)</th>
               <th className="px-4 py-3 text-right">Neto a Pagar</th>
@@ -269,7 +271,7 @@ export default function PayrollPage() {
           <tbody className="divide-y divide-slate-800">
             {loading ? (
               <tr>
-                <td colSpan={8} className="text-center py-8 text-slate-500">
+                <td colSpan={9} className="text-center py-8 text-slate-500">
                   Calculando pre-nómina consolidada...
                 </td>
               </tr>
@@ -299,6 +301,18 @@ export default function PayrollPage() {
                   </td>
                   <td className="px-4 py-3 font-mono text-rose-400">
                     - S/ {item.lateDiscount?.toFixed(2)}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-rose-400">
+                    {item.absenceDiscount > 0 ? (
+                      <div>
+                        <div>- S/ {item.absenceDiscount.toFixed(2)}</div>
+                        <div className="text-[10px] text-slate-500">
+                          ({item.absenceDays} día/s{item.absenceHours ? ` • ${item.absenceHours}h` : ''})
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-slate-600">S/ 0.00</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 font-mono text-amber-400">
                     {item.unpaidLeaveDiscount > 0 ? (

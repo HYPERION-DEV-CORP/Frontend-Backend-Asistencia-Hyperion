@@ -1,0 +1,425 @@
+// src/app/dashboard/settings/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import {
+  Utensils,
+  Clock,
+  CalendarDays,
+  MapPin,
+  Save,
+  ShieldCheck,
+  Info,
+} from 'lucide-react';
+
+interface CompanySettings {
+  name: string;
+  ruc: string;
+  lunchWindowStart: string;
+  lunchWindowEnd: string;
+  lunchDurationMinutes: number;
+  lunchDays: number[];
+  saturdayWorkHours: number;
+  officeLat: number;
+  officeLng: number;
+  radiusM: number;
+}
+
+const WEEK_DAYS = [
+  { id: 1, label: 'Lunes' },
+  { id: 2, label: 'Martes' },
+  { id: 3, label: 'Miércoles' },
+  { id: 4, label: 'Jueves' },
+  { id: 5, label: 'Viernes' },
+  { id: 6, label: 'Sábado' },
+  { id: 0, label: 'Domingo' },
+];
+
+export default function CompanySettingsPage() {
+  const [settings, setSettings] = useState<CompanySettings>({
+    name: 'Hyperion Digital Security S.A.C.',
+    ruc: '20608810987',
+    lunchWindowStart: '13:00',
+    lunchWindowEnd: '13:30',
+    lunchDurationMinutes: 60,
+    lunchDays: [1, 2, 3, 4, 5],
+    saturdayWorkHours: 4.5,
+    officeLat: -14.078775,
+    officeLng: -75.751176,
+    radiusM: 50,
+  });
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    fetch('/api/v1/admin/company/settings')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.settings) {
+          setSettings(data.settings);
+        }
+      })
+      .catch(() => null)
+      .finally(() => setLoading(false));
+  }, []);
+
+  const toggleLunchDay = (dayId: number) => {
+    setSettings((prev) => {
+      const exists = prev.lunchDays.includes(dayId);
+      return {
+        ...prev,
+        lunchDays: exists
+          ? prev.lunchDays.filter((d) => d !== dayId)
+          : [...prev.lunchDays, dayId],
+      };
+    });
+  };
+
+  // Calcula un ejemplo dinámico de retorno si sale justo al abrir la ventana
+  const computeExampleReturn = () => {
+    if (!settings.lunchWindowStart) return '--:--';
+    const [h, m] = settings.lunchWindowStart.split(':').map(Number);
+    const total = h * 60 + m + (Number(settings.lunchDurationMinutes) || 60);
+    const endH = String(Math.floor(total / 60) % 24).padStart(2, '0');
+    const endM = String(total % 60).padStart(2, '0');
+    return `${endH}:${endM}`;
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setFeedback(null);
+
+    try {
+      const storedUser = localStorage.getItem('user');
+      const adminId = storedUser ? JSON.parse(storedUser).id : null;
+
+      const res = await fetch('/api/v1/admin/company/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...settings, adminId }),
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setFeedback({ type: 'ok', text: data.message || 'Parámetros guardados correctamente.' });
+      } else {
+        setFeedback({ type: 'err', text: data.error || 'No se pudo guardar la configuración.' });
+      }
+    } catch {
+      setFeedback({ type: 'err', text: 'Error de conexión con el servidor.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="p-8 text-sm text-slate-400">Cargando parámetros corporativos...</div>;
+  }
+
+  return (
+    <form onSubmit={handleSave} className="space-y-6 max-w-6xl">
+      {/* CABECERA */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+        <div>
+          <h1 className="text-xl font-bold text-white flex items-center gap-2">
+            <ShieldCheck className="w-6 h-6 text-[#00BFA5]" />
+            Configuración Operativa de Refrigerio y Jornadas
+          </h1>
+          <p className="text-xs text-slate-400 mt-1">
+            {settings.name} | RUC: {settings.ruc} — Los cambios aplican inmediatamente en la App Móvil y en el cálculo de Planilla.
+          </p>
+        </div>
+
+        <button
+          type="submit"
+          disabled={saving}
+          className="flex items-center gap-2 bg-[#00BFA5] hover:bg-[#00a892] text-slate-950 text-xs font-extrabold px-5 py-2.5 rounded-lg shadow-lg transition cursor-pointer disabled:opacity-60"
+        >
+          <Save className="w-4 h-4" />
+          {saving ? 'Guardando cambios...' : 'Guardar Toda la Configuración'}
+        </button>
+      </div>
+
+      {feedback && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs font-semibold ${
+            feedback.type === 'ok'
+              ? 'bg-emerald-950/60 border-emerald-700/50 text-emerald-300'
+              : 'bg-rose-950/60 border-rose-700/50 text-rose-300'
+          }`}
+        >
+          {feedback.type === 'ok' ? '✅ ' : '⚠️ '}
+          {feedback.text}
+        </div>
+      )}
+
+      {/* GRILLA DE TARJETAS CONFIGURABLES */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* TARJETA 1: VENTANA DE INICIO DE REFRIGERIO */}
+        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+          <div>
+            <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+              <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                <Utensils className="w-5 h-5" />
+              </div>
+              1. Ventana Permitida para Iniciar Refrigerio
+            </div>
+            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+              Define el rango horario en el que los trabajadores pueden pulsar{' '}
+              <strong className="text-slate-200">Inicio Refrigerio</strong> en la aplicación móvil.
+              Fuera de este rango el sistema bloqueará la marcación y enviará un recordatorio 5 minutos antes del cierre.
+            </p>
+
+            <div className="grid grid-cols-2 gap-4 mt-5">
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-1.5">
+                  Hora de Apertura (Inicio)
+                </label>
+                <input
+                  type="time"
+                  required
+                  value={settings.lunchWindowStart}
+                  onChange={(e) =>
+                    setSettings({ ...settings, lunchWindowStart: e.target.value })
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+                />
+                <span className="text-[11px] text-slate-500 mt-1 block">
+                  Dispara la 1ra notificación push.
+                </span>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-1.5">
+                  Hora Límite de Salida (Cierre)
+                </label>
+                <input
+                  type="time"
+                  required
+                  value={settings.lunchWindowEnd}
+                  onChange={(e) =>
+                    setSettings({ ...settings, lunchWindowEnd: e.target.value })
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+                />
+                <span className="text-[11px] text-slate-500 mt-1 block">
+                  Avisa 5 min antes si aún no marca.
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 flex items-center gap-2">
+            <Info className="w-4 h-4 text-[#00BFA5] shrink-0" />
+            <span>
+              Los empleados podrán iniciar su refrigerio únicamente entre las{' '}
+              <strong className="text-white">{settings.lunchWindowStart}</strong> y las{' '}
+              <strong className="text-white">{settings.lunchWindowEnd}</strong>.
+            </span>
+          </div>
+        </div>
+
+        {/* TARJETA 2: DURACIÓN Y CONTEO DE MINUTOS */}
+        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+          <div>
+            <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+              <div className="p-2 rounded-lg bg-[#00BFA5]/10 text-[#00BFA5] border border-[#00BFA5]/20">
+                <Clock className="w-5 h-5" />
+              </div>
+              2. Duración Obligatoria del Refrigerio (Conteo)
+            </div>
+            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+              Establece cuántos minutos exactos se cuentan desde que el trabajador marca su{' '}
+              <strong className="text-slate-200">Inicio de Refrigerio</strong>. La app notificará 10
+              minutos antes de culminar y al cumplirse el tiempo total. Si excede este tiempo, los
+              minutos extra se suman automáticamente como tardanza.
+            </p>
+
+            <div className="mt-5">
+              <label className="text-xs font-bold text-slate-300 block mb-1.5">
+                Minutos Permitidos de Refrigerio (Mínimo legal: 45 min)
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  min={45}
+                  max={180}
+                  required
+                  value={settings.lunchDurationMinutes}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      lunchDurationMinutes: Number(e.target.value),
+                    })
+                  }
+                  className="w-36 bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+                />
+                <div className="flex gap-1.5">
+                  {[45, 60, 90].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() =>
+                        setSettings({ ...settings, lunchDurationMinutes: preset })
+                      }
+                      className={`px-3 py-2 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                        settings.lunchDurationMinutes === preset
+                          ? 'bg-[#00BFA5] text-slate-950 border-[#00BFA5]'
+                          : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                      }`}
+                    >
+                      {preset} min
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 flex items-center gap-2">
+            <Info className="w-4 h-4 text-[#00BFA5] shrink-0" />
+            <span>
+              Ejemplo: Si inicia a las <strong className="text-white">{settings.lunchWindowStart}</strong>,
+              su retorno obligatorio será a las{' '}
+              <strong className="text-[#00BFA5]">{computeExampleReturn()}</strong> (
+              {settings.lunchDurationMinutes} min después).
+            </span>
+          </div>
+        </div>
+
+        {/* TARJETA 3: DÍAS CON REFRIGERIO Y JORNADA DE SÁBADOS */}
+        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+          <div>
+            <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+              <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                <CalendarDays className="w-5 h-5" />
+              </div>
+              3. Días con Refrigerio y Jornada de Sábados
+            </div>
+            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+              Selecciona qué días de la semana incluyen turno de refrigerio. Los días no marcados
+              (como sábados de jornada corta) permiten marcar salida directa sin exigir refrigerio y
+              calculan el descuento de faltas según las horas configuradas.
+            </p>
+
+            <div className="mt-4">
+              <label className="text-xs font-bold text-slate-300 block mb-2">
+                Días habilitados para marcar Refrigerio
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {WEEK_DAYS.map((day) => {
+                  const active = settings.lunchDays.includes(day.id);
+                  return (
+                    <button
+                      key={day.id}
+                      type="button"
+                      onClick={() => toggleLunchDay(day.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                        active
+                          ? 'bg-indigo-600 text-white border-indigo-500'
+                          : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'
+                      }`}
+                    >
+                      {day.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <label className="text-xs font-bold text-slate-300 block mb-1.5">
+                Horas Laborales del Sábado (Para cálculo de Planilla y Horas Extras)
+              </label>
+              <input
+                type="number"
+                step="0.5"
+                min={0}
+                max={8}
+                value={settings.saturdayWorkHours}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    saturdayWorkHours: Number(e.target.value),
+                  })
+                }
+                className="w-36 bg-slate-900 border border-slate-700 rounded-xl p-2 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+              />
+              <span className="text-[11px] text-slate-500 ml-2">
+                horas (ej. 4.5h para turno 09:00 a 13:30)
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* TARJETA 4: GEOCERCA Y SEDE PRINCIPAL */}
+        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+          <div>
+            <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+              <div className="p-2 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                <MapPin className="w-5 h-5" />
+              </div>
+              4. Perímetro GPS de Oficina Principal (Geocerca)
+            </div>
+            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+              Coordenadas centrales y radio máximo permitido (en metros) para validar marcaciones
+              presenciales mediante QR, NFC, Huella o Reconocimiento Facial.
+            </p>
+
+            <div className="grid grid-cols-3 gap-3 mt-5">
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-1.5">Latitud</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={settings.officeLat}
+                  onChange={(e) =>
+                    setSettings({ ...settings, officeLat: Number(e.target.value) })
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-1.5">Longitud</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={settings.officeLng}
+                  onChange={(e) =>
+                    setSettings({ ...settings, officeLng: Number(e.target.value) })
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-1.5">Radio (m)</label>
+                <input
+                  type="number"
+                  min={10}
+                  max={1000}
+                  value={settings.radiusM}
+                  onChange={(e) =>
+                    setSettings({ ...settings, radiusM: Number(e.target.value) })
+                  }
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 flex items-center gap-2">
+            <Info className="w-4 h-4 text-[#00BFA5] shrink-0" />
+            <span>
+              Cualquier marcación presencial fuera de{' '}
+              <strong className="text-white">{settings.radiusM} metros</strong> será rechazada
+              automáticamente por seguridad.
+            </span>
+          </div>
+        </div>
+      </div>
+    </form>
+  );
+}

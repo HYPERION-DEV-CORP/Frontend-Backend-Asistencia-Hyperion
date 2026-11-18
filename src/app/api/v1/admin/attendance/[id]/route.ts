@@ -51,12 +51,15 @@ export async function PUT(
       );
     }
 
-    // 2. Consulta de la marcación previa
+    // 2. Consulta de la marcación previa (incluyendo company y payrollPolicy)
     const rawRecord = await prisma.attendanceRecord.findUnique({
       where: { id: recordId },
       include: {
         user: {
-          include: { payrollPolicy: true },
+          include: {
+            payrollPolicy: true,
+            company: true,
+          },
         },
       },
     });
@@ -75,10 +78,16 @@ export async function PUT(
     await assertPeriodIsOpen(record.date, user.companyId);
 
     // 3.1. Bloquear edición si existe una papeleta aprobada SIN GOCE que afecte la jornada de ese día
-    // (Se excluye únicamente el día de cierre cuando el permiso termina en o antes del inicio del turno, ej. 09:00 a. m.)
     const recordDateStr = new Date(record.date).toISOString().split("T")[0];
     const [wH, wM] = (user.workStartTime || "09:00").split(":").map(Number);
     const userHoursPerDay = user.payrollPolicy?.hoursPerDay || 8.0;
+    const configuredLunchMinutes = user.company?.lunchDurationMinutes ?? 60;
+    const isSaturday = new Date(record.date).getUTCDay() === 6;
+
+    const effectiveDayHours = isSaturday
+      ? (user.company?.saturdayWorkHours ?? 4.5)
+      : userHoursPerDay;
+    const lunchHours = isSaturday ? 0 : configuredLunchMinutes / 60;
 
     // Inicio y fin del turno en hora Perú (UTC-5 -> +5h en UTC)
     const shiftStartUtc = new Date(
@@ -87,7 +96,7 @@ export async function PUT(
     shiftStartUtc.setUTCHours(shiftStartUtc.getUTCHours() + 5);
 
     const shiftEndUtc = new Date(
-      shiftStartUtc.getTime() + (userHoursPerDay + 1.0) * 60 * 60 * 1000,
+      shiftStartUtc.getTime() + (effectiveDayHours + lunchHours) * 60 * 60 * 1000,
     );
 
     const activeUnpaidPermit = await prisma.permissionRequest.findFirst({
@@ -95,9 +104,7 @@ export async function PUT(
         userId: record.userId,
         status: "APPROVED",
         reason: { contains: "SIN GOCE", mode: "insensitive" },
-        // La papeleta empieza antes de que termine el turno de este día
         startDate: { lt: shiftEndUtc },
-        // Y termina DESPUÉS de que inicie el turno de este día (si termina a las 09:00 a. m. del 17/11, NO bloquea el 17/11)
         endDate: { gt: shiftStartUtc },
       },
     });
@@ -112,30 +119,33 @@ export async function PUT(
       );
     }
 
-    const dateObj = new Date(record.date);
-    const year = dateObj.getFullYear();
-    const month = String(dateObj.getMonth() + 1).padStart(2, "0");
-    const day = String(dateObj.getDate()).padStart(2, "0");
-    const dateStr = `${year}-${month}-${day}`;
+    // Usamos directamente recordDateStr (YYYY-MM-DD) para evitar desfases de día por zona horaria
+    const dateStr = recordDateStr;
 
-    // 4. Reconstrucción de Fechas
+    // 4. Reconstrucción de Fechas (permite editar solo ingreso sin rellenar refrigerio/salida, y también limpiar campos)
     let updatedCheckIn = record.checkIn;
-    if (newCheckIn && newCheckIn.includes(":")) {
+    if (newCheckIn && typeof newCheckIn === "string" && newCheckIn.includes(":")) {
       updatedCheckIn = new Date(`${dateStr}T${newCheckIn}:00.000`);
     }
 
     let updatedLunchStart = record.lunchStart;
-    if (newLunchStart && newLunchStart.includes(":")) {
+    if (newLunchStart === null || newLunchStart === "") {
+      updatedLunchStart = null;
+    } else if (typeof newLunchStart === "string" && newLunchStart.includes(":")) {
       updatedLunchStart = new Date(`${dateStr}T${newLunchStart}:00.000`);
     }
 
     let updatedLunchEnd = record.lunchEnd;
-    if (newLunchEnd && newLunchEnd.includes(":")) {
+    if (newLunchEnd === null || newLunchEnd === "") {
+      updatedLunchEnd = null;
+    } else if (typeof newLunchEnd === "string" && newLunchEnd.includes(":")) {
       updatedLunchEnd = new Date(`${dateStr}T${newLunchEnd}:00.000`);
     }
 
     let updatedCheckOut = record.checkOut;
-    if (newCheckOut && newCheckOut.includes(":")) {
+    if (newCheckOut === null || newCheckOut === "") {
+      updatedCheckOut = null;
+    } else if (typeof newCheckOut === "string" && newCheckOut.includes(":")) {
       updatedCheckOut = new Date(`${dateStr}T${newCheckOut}:00.000`);
     }
 
@@ -165,11 +175,11 @@ export async function PUT(
       }
     }
 
-    // 5.1. Control de Exceso de Refrigerio (D.S. N° 007-2002-TR)
+    // 5.1. Control de Exceso de Refrigerio según duración configurada en la empresa (D.S. N° 007-2002-TR)
     const { totalLunchMinutes, excessMinutes } = calculateLunchExcessMinutes(
       updatedLunchStart,
       updatedLunchEnd,
-      60,
+      configuredLunchMinutes,
     );
 
     if (excessMinutes > 0) {
@@ -182,14 +192,14 @@ export async function PUT(
         ? ` | Exceso refrigerio: ${totalLunchMinutes} min (+${excessMinutes} min añadidos a tardanza)`
         : "";
 
-    // 6. Cálculo de Horas Extras (25% y 35%)
+    // 6. Cálculo de Horas Extras (25% y 35%) según jornada del día y duración de refrigerio configurada
     let totalOvertimeMinutes = 0;
     let overtime25Minutes = 0;
     let overtime35Minutes = 0;
 
     if (updatedCheckOut && user.workStartTime) {
       const [workHour, workMin] = user.workStartTime.split(":").map(Number);
-      const totalShiftHours = userHoursPerDay + 1.0;
+      const totalShiftHours = effectiveDayHours + lunchHours;
 
       const officialCheckOut = new Date(
         new Date(

@@ -17,6 +17,9 @@ export async function PUT(
     const body = await req.json();
     const {
       jobTitle,
+      role,
+      biometricCode,
+      isSubjectToSupervision,
       workStartTime,
       toleranceMinutes,
       homeOfficeQuota,
@@ -28,11 +31,22 @@ export async function PUT(
       where: { id: userId },
       data: {
         jobTitle,
+        ...(role && ['ADMIN', 'HR', 'EMPLOYEE'].includes(role) ? { role } : {}),
+        ...(biometricCode !== undefined
+          ? {
+              biometricCode:
+                biometricCode && String(biometricCode).trim() !== ''
+                  ? String(biometricCode).trim().padStart(8, '0')
+                  : null,
+            }
+          : {}),
+        ...(typeof isSubjectToSupervision === 'boolean' ? { isSubjectToSupervision } : {}),
         workStartTime,
         toleranceMinutes: Number(toleranceMinutes),
         homeOfficeQuota: Number(homeOfficeQuota),
         baseSalary: Number(baseSalary),
-        payrollPolicyId: payrollPolicyId && String(payrollPolicyId).trim() !== '' ? payrollPolicyId : null,
+        payrollPolicyId:
+          payrollPolicyId && String(payrollPolicyId).trim() !== '' ? payrollPolicyId : null,
       },
       include: {
         payrollPolicy: true,

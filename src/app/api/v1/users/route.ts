@@ -3,13 +3,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import bcrypt from 'bcryptjs';
 
-// 1. OBTENER LISTA DE TRABAJADORES (Incluye régimen de planilla y datos de la empresa)
+// 1. OBTENER LISTA DE TRABAJADORES
 export async function GET() {
   try {
     const users = await prisma.user.findMany({
       orderBy: { createdAt: 'desc' },
       include: {
-        payrollPolicy: true, // Incluye los datos completos de la política para el frontend
+        payrollPolicy: true,
         company: true,
       },
     });
@@ -29,6 +29,10 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const {
       dni,
+      docType,
+      biometricCode,
+      role,
+      isSubjectToSupervision,
       name,
       lastName,
       email,
@@ -36,14 +40,10 @@ export async function POST(req: NextRequest) {
       workStartTime,
       toleranceMinutes,
       homeOfficeQuota,
-      overtimeRate,
       baseSalary,
-      hoursPerDay,
-      daysInMonth,
       payrollPolicyId,
     } = body;
 
-    // Verificar si el DNI o Email ya existen
     const existingUser = await prisma.user.findFirst({
       where: {
         OR: [{ dni }, { email }],
@@ -57,7 +57,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Obtener la empresa por defecto
     const company = await prisma.company.findFirst();
     if (!company) {
       return NextResponse.json(
@@ -66,12 +65,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Hash de la contraseña inicial por defecto ("123456")
     const passwordHash = await bcrypt.hash('123456', 10);
 
     const newUser = await prisma.user.create({
       data: {
         dni,
+        docType: docType || 'DNI',
+        biometricCode:
+          biometricCode && String(biometricCode).trim() !== ''
+            ? String(biometricCode).trim().padStart(8, '0')
+            : null,
+        role: role && ['ADMIN', 'HR', 'EMPLOYEE'].includes(role) ? role : 'EMPLOYEE',
+        isSubjectToSupervision:
+          typeof isSubjectToSupervision === 'boolean' ? isSubjectToSupervision : true,
         name,
         lastName,
         email,
@@ -80,11 +86,9 @@ export async function POST(req: NextRequest) {
         workStartTime: workStartTime || '09:00',
         toleranceMinutes: toleranceMinutes ? parseInt(String(toleranceMinutes)) : 10,
         homeOfficeQuota: homeOfficeQuota ? parseInt(String(homeOfficeQuota)) : 4,
-        overtimeRate: overtimeRate ? parseFloat(String(overtimeRate)) : 1.25,
         baseSalary: baseSalary ? parseFloat(String(baseSalary)) : 0.0,
-        hoursPerDay: hoursPerDay ? parseFloat(String(hoursPerDay)) : 8.0,
-        daysInMonth: daysInMonth ? parseInt(String(daysInMonth)) : 30,
-        payrollPolicyId: payrollPolicyId && String(payrollPolicyId).trim() !== '' ? payrollPolicyId : null,
+        payrollPolicyId:
+          payrollPolicyId && String(payrollPolicyId).trim() !== '' ? payrollPolicyId : null,
         companyId: company.id,
       },
       include: {

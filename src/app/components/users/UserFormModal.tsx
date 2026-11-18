@@ -1,4 +1,4 @@
-// src/components/users/UserFormModal.tsx
+// src/app/components/users/UserFormModal.tsx
 'use client';
 
 import { useState, useEffect } from 'react';
@@ -7,6 +7,9 @@ import { X, UserPlus, Save, Shield, BadgeCheck } from 'lucide-react';
 export interface UserFormData {
   id?: string;
   dni: string;
+  biometricCode?: string | null;
+  role?: 'EMPLOYEE' | 'HR' | 'ADMIN';
+  isSubjectToSupervision?: boolean;
   name: string;
   lastName: string;
   email: string;
@@ -14,8 +17,8 @@ export interface UserFormData {
   workStartTime: string;
   toleranceMinutes: number;
   homeOfficeQuota: number;
-  overtimeRate: number;
   baseSalary: number;
+  payrollPolicyId?: string;
   active?: boolean;
 }
 
@@ -28,6 +31,9 @@ interface UserFormModalProps {
 
 const DEFAULT_FORM_STATE: UserFormData = {
   dni: '',
+  biometricCode: '',
+  role: 'EMPLOYEE',
+  isSubjectToSupervision: true,
   name: '',
   lastName: '',
   email: '',
@@ -35,7 +41,6 @@ const DEFAULT_FORM_STATE: UserFormData = {
   workStartTime: '09:00',
   toleranceMinutes: 10,
   homeOfficeQuota: 4,
-  overtimeRate: 1.25,
   baseSalary: 2500,
   active: true,
 };
@@ -54,6 +59,9 @@ export default function UserFormModal({
       setFormData({
         id: userToEdit.id,
         dni: userToEdit.dni || '',
+        biometricCode: userToEdit.biometricCode || '',
+        role: userToEdit.role || 'EMPLOYEE',
+        isSubjectToSupervision: userToEdit.isSubjectToSupervision ?? true,
         name: userToEdit.name || '',
         lastName: userToEdit.lastName || '',
         email: userToEdit.email || '',
@@ -61,8 +69,8 @@ export default function UserFormModal({
         workStartTime: userToEdit.workStartTime || '09:00',
         toleranceMinutes: userToEdit.toleranceMinutes ?? 10,
         homeOfficeQuota: userToEdit.homeOfficeQuota ?? 4,
-        overtimeRate: userToEdit.overtimeRate ?? 1.25,
         baseSalary: userToEdit.baseSalary ?? 2500,
+        payrollPolicyId: userToEdit.payrollPolicyId || '',
         active: userToEdit.active ?? true,
       });
     } else {
@@ -85,14 +93,13 @@ export default function UserFormModal({
     }
   };
 
-  // Estilo con prioridad de color de texto forzado
-  const inputStyle = "w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm font-bold shadow-sm focus:outline-none focus:ring-2 focus:ring-[#00B3B3]";
+  const inputStyle =
+    'w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm font-bold shadow-sm focus:outline-none focus:ring-2 focus:ring-[#00B3B3]';
   const inputInlineStyles = { color: '#0f172a', backgroundColor: '#f8fafc' };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
       <div className="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-        
         {/* HEADER MODAL */}
         <div className="px-6 py-4 bg-slate-900 border-b border-slate-800 flex justify-between items-center text-white">
           <div className="flex items-center gap-3">
@@ -104,7 +111,9 @@ export default function UserFormModal({
                 {userToEdit ? `Editar Parámetros de ${userToEdit.name}` : 'Registrar Nuevo Trabajador'}
               </h2>
               <p className="text-xs text-slate-300">
-                {userToEdit ? 'Modificación de perfil laboral y cuotas' : 'Asignación de credenciales (Contraseña inicial: 123456)'}
+                {userToEdit
+                  ? 'Modificación de perfil laboral, rol y fiscalización'
+                  : 'Asignación de credenciales (Contraseña inicial: 123456)'}
               </p>
             </div>
           </div>
@@ -119,16 +128,17 @@ export default function UserFormModal({
 
         {/* FORMULARIO */}
         <form onSubmit={handleSubmit} className="p-6 space-y-5 overflow-y-auto flex-1 bg-white">
-          
           {/* SECCIÓN 1: DATOS PERSONALES */}
           <div className="space-y-3">
             <h3 className="text-xs font-bold text-[#025A81] uppercase tracking-wider flex items-center gap-2">
-              <Shield size={15} /> Información Personal
+              <Shield size={15} /> Información Personal y Acceso
             </h3>
-            
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="text-xs font-extrabold text-slate-900 block mb-1">DNI (Identificación)</label>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  DNI (Identificación)
+                </label>
                 <input
                   type="text"
                   required
@@ -142,7 +152,9 @@ export default function UserFormModal({
               </div>
 
               <div>
-                <label className="text-xs font-extrabold text-slate-900 block mb-1">Correo Electrónico</label>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  Correo Electrónico
+                </label>
                 <input
                   type="email"
                   required
@@ -179,24 +191,83 @@ export default function UserFormModal({
                   onChange={(e) => setFormData({ ...formData, lastName: e.target.value })}
                 />
               </div>
+
+              <div>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  Rol en el Sistema
+                </label>
+                <select
+                  className={inputStyle}
+                  style={inputInlineStyles}
+                  value={formData.role || 'EMPLOYEE'}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      role: e.target.value as 'EMPLOYEE' | 'HR' | 'ADMIN',
+                    })
+                  }
+                >
+                  <option value="EMPLOYEE">Trabajador (Estándar)</option>
+                  <option value="HR">Recursos Humanos (RRHH)</option>
+                  <option value="ADMIN">Gerencia / Administrador</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  ID Reloj Biométrico (EnNo)
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ej: 00000001"
+                  className={`${inputStyle} font-mono`}
+                  style={inputInlineStyles}
+                  value={formData.biometricCode || ''}
+                  onChange={(e) => setFormData({ ...formData, biometricCode: e.target.value })}
+                />
+              </div>
             </div>
           </div>
 
           <hr className="border-slate-200" />
 
-          {/* SECCIÓN 2: PARÁMETROS LABORALES */}
+          {/* SECCIÓN 2: PARÁMETROS LABORALES Y FISCALIZACIÓN */}
           <div className="space-y-3">
             <h3 className="text-xs font-bold text-[#025A81] uppercase tracking-wider">
-              Parámetros de Asistencia y Nómina
+              Parámetros de Asistencia y Fiscalización (SUNAFIL)
             </h3>
+
+            {/* Control de Sujeto a Fiscalización */}
+            <label className="flex items-start gap-3 p-3.5 rounded-xl border border-slate-300 bg-slate-50 cursor-pointer hover:bg-slate-100 transition">
+              <input
+                type="checkbox"
+                checked={formData.isSubjectToSupervision ?? true}
+                onChange={(e) =>
+                  setFormData({ ...formData, isSubjectToSupervision: e.target.checked })
+                }
+                className="mt-0.5 w-4 h-4 accent-[#025A81] cursor-pointer"
+              />
+              <div>
+                <span className="text-xs font-extrabold text-slate-900 block">
+                  Sujeto a Fiscalización de Asistencia (D.S. N° 004-2006-TR)
+                </span>
+                <span className="text-[11px] text-slate-600 block mt-0.5">
+                  {formData.isSubjectToSupervision
+                    ? 'Activo: Este trabajador debe marcar asistencia y generará tardanzas o faltas injustificadas automáticamente.'
+                    : 'Exonerado (Art. 5): Personal de dirección o no fiscalizado. No genera faltas automáticas si no marca.'}
+                </span>
+              </div>
+            </label>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="md:col-span-2">
-                <label className="text-xs font-extrabold text-slate-900 block mb-1">Cargo / Puesto</label>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  Cargo / Puesto
+                </label>
                 <input
                   type="text"
                   required
-                  placeholder="Desarrollador Full Stack / Ingeniero de Sistemas"
+                  placeholder="Desarrollador Full Stack / Gerente General"
                   className={inputStyle}
                   style={inputInlineStyles}
                   value={formData.jobTitle}
@@ -205,7 +276,9 @@ export default function UserFormModal({
               </div>
 
               <div>
-                <label className="text-xs font-extrabold text-slate-900 block mb-1">Hora Entrada Esperada</label>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  Hora Entrada Esperada
+                </label>
                 <input
                   type="time"
                   required
@@ -217,44 +290,41 @@ export default function UserFormModal({
               </div>
 
               <div>
-                <label className="text-xs font-extrabold text-slate-900 block mb-1">Tolerancia Tardanza (Minutos)</label>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  Tolerancia Tardanza (Minutos)
+                </label>
                 <input
                   type="number"
                   required
                   className={inputStyle}
                   style={inputInlineStyles}
                   value={formData.toleranceMinutes}
-                  onChange={(e) => setFormData({ ...formData, toleranceMinutes: parseInt(e.target.value) || 0 })}
+                  onChange={(e) =>
+                    setFormData({ ...formData, toleranceMinutes: parseInt(e.target.value) || 0 })
+                  }
                 />
               </div>
 
               <div>
-                <label className="text-xs font-extrabold text-slate-900 block mb-1">Cuota Mensual Home Office (Días)</label>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  Cuota Mensual Home Office (Días)
+                </label>
                 <input
                   type="number"
                   required
                   className={inputStyle}
                   style={inputInlineStyles}
                   value={formData.homeOfficeQuota}
-                  onChange={(e) => setFormData({ ...formData, homeOfficeQuota: parseInt(e.target.value) || 0 })}
+                  onChange={(e) =>
+                    setFormData({ ...formData, homeOfficeQuota: parseInt(e.target.value) || 0 })
+                  }
                 />
               </div>
 
               <div>
-                <label className="text-xs font-extrabold text-slate-900 block mb-1">Factor Horas Extra</label>
-                <input
-                  type="number"
-                  step="0.05"
-                  required
-                  className={inputStyle}
-                  style={inputInlineStyles}
-                  value={formData.overtimeRate}
-                  onChange={(e) => setFormData({ ...formData, overtimeRate: parseFloat(e.target.value) || 1.25 })}
-                />
-              </div>
-
-              <div className="md:col-span-2">
-                <label className="text-xs font-extrabold text-slate-900 block mb-1">Sueldo Base (S/)</label>
+                <label className="text-xs font-extrabold text-slate-900 block mb-1">
+                  Sueldo Base (S/)
+                </label>
                 <input
                   type="number"
                   required
@@ -262,7 +332,9 @@ export default function UserFormModal({
                   className={inputStyle}
                   style={inputInlineStyles}
                   value={formData.baseSalary}
-                  onChange={(e) => setFormData({ ...formData, baseSalary: parseFloat(e.target.value) || 0 })}
+                  onChange={(e) =>
+                    setFormData({ ...formData, baseSalary: parseFloat(e.target.value) || 0 })
+                  }
                 />
               </div>
             </div>

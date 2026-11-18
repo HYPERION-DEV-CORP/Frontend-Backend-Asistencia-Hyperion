@@ -15,6 +15,7 @@ import {
   LogOut,
   Building2,
   SliceIcon,
+  Settings,
 } from 'lucide-react';
 
 interface NavItem {
@@ -66,6 +67,11 @@ const navItems: NavItem[] = [
     label: 'Políticas de Planilla',
     href: '/dashboard/policies',
     icon: SliceIcon,
+  },
+  {
+    label: 'Configuración Empresa',
+    href: '/dashboard/settings',
+    icon: Settings,
   },
 ];
 

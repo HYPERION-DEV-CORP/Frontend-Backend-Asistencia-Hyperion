@@ -2,6 +2,8 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 
+const SATURDAY_WORK_HOURS = 4.5; // Sábados: 9:00 AM a 1:30 PM (4 horas y 30 minutos)
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -82,11 +84,15 @@ export async function GET(request: Request) {
       let totalOvertime25Minutes = 0;
       let totalOvertime35Minutes = 0;
       let absenceDays = 0;
+      let absenceHours = 0;
 
       u.attendanceRecords.forEach((r) => {
-        // Si el día fue marcado como falta injustificada (ABSENT), suma 1 día de descuento
         if (r.status === 'ABSENT') {
+          const dayOfWeek = new Date(r.date).getUTCDay(); // 0 = Domingo, 6 = Sábado
+          if (dayOfWeek === 0) return;
+
           absenceDays += 1;
+          absenceHours += dayOfWeek === 6 ? SATURDAY_WORK_HOURS : hoursPerDay;
           return;
         }
 
@@ -107,12 +113,10 @@ export async function GET(request: Request) {
         p.reason?.toUpperCase().includes('SIN GOCE')
       );
 
-      // 2. Calcular minutos no remunerados según intersección con la jornada laboral de cada día
+      // 2. Calcular minutos no remunerados según la jornada real del día (L-V: 8h + 1h ref | Sáb: 4.5h continuo)
       let unpaidLeaveMinutes = 0;
       const [workH, workM] = (u.workStartTime || '09:00').split(':').map(Number);
       const shiftStartMins = workH * 60 + workM;
-      const lunchDurationMins = 60;
-      const shiftEndMins = shiftStartMins + hoursPerDay * 60 + lunchDurationMins;
 
       for (const perm of userUnpaidPermissions) {
         const pStart = new Date(perm.startDate);
@@ -129,6 +133,7 @@ export async function GET(request: Request) {
         const limit = new Date(`${endDayStr}T00:00:00.000Z`);
 
         while (cursor <= limit) {
+          const dayOfWeek = cursor.getUTCDay();
           const cursorStr = cursor.toISOString().split('T')[0];
           const inPeriodStart =
             !periodDetails || cursor >= new Date(periodDetails.startDate);
@@ -139,7 +144,14 @@ export async function GET(request: Request) {
                 new Date(periodDetails.endDate).setUTCHours(23, 59, 59, 999)
               );
 
-          if (inPeriodStart && inPeriodEnd) {
+          // Domingos (0) no son laborables
+          if (dayOfWeek !== 0 && inPeriodStart && inPeriodEnd) {
+            const isSaturday = dayOfWeek === 6;
+            const dayWorkHours = isSaturday ? SATURDAY_WORK_HOURS : hoursPerDay;
+            const lunchDurationMins = isSaturday ? 0 : 60;
+            const shiftEndMins =
+              shiftStartMins + dayWorkHours * 60 + lunchDurationMins;
+
             const attendanceThatDay = u.attendanceRecords.find(
               (r) => new Date(r.date).toISOString().split('T')[0] === cursorStr
             );
@@ -166,8 +178,8 @@ export async function GET(request: Request) {
 
               if (dayEndMins > dayStartMins) {
                 let rawAbsentMins = dayEndMins - dayStartMins;
-                if (rawAbsentMins > hoursPerDay * 60) {
-                  rawAbsentMins = hoursPerDay * 60;
+                if (rawAbsentMins > dayWorkHours * 60) {
+                  rawAbsentMins = dayWorkHours * 60;
                 }
                 unpaidLeaveMinutes += rawAbsentMins;
               }
@@ -177,8 +189,9 @@ export async function GET(request: Request) {
         }
       }
 
+      // Descuento proporcional por horas efectivas de los días faltados (L-V = 8h, Sáb = 4.5h)
       const absenceDiscount =
-        Math.round(absenceDays * dailyRate * 100) / 100;
+        Math.round(absenceHours * hourlyRate * 100) / 100;
       const lateDiscount =
         Math.round(totalLateMinutes * minuteRate * 100) / 100;
       const unpaidLeaveDiscount =
@@ -216,6 +229,7 @@ export async function GET(request: Request) {
         hourlyRate: Math.round(hourlyRate * 100) / 100,
         minuteRate: Number(minuteRate.toFixed(4)),
         absenceDays,
+        absenceHours,
         absenceDiscount,
         totalLateMinutes,
         unpaidLeaveMinutes,

@@ -5,6 +5,13 @@ import { calculateDistanceInMeters } from '@/lib/geo';
 import { calculateLunchExcessMinutes } from '@/lib/sst-monitor';
 import { assertPeriodIsOpen } from '@/lib/payroll-period';
 
+// Helper para convertir "HH:mm" a [hora, minuto]
+function parseTimeHHMM(timeStr: string | null | undefined, fallbackH: number, fallbackM: number): [number, number] {
+  if (!timeStr || !timeStr.includes(':')) return [fallbackH, fallbackM];
+  const [h, m] = timeStr.split(':').map(Number);
+  return [isNaN(h) ? fallbackH : h, isNaN(m) ? fallbackM : m];
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -24,10 +31,10 @@ export async function POST(req: NextRequest) {
     const today = new Date(serverTimestamp);
     today.setHours(0, 0, 0, 0);
 
-    // 1. BUSCAR TRABAJADOR EN LA BASE DE DATOS
+    // 1. BUSCAR TRABAJADOR Y CONFIGURACIÓN DINÁMICA DE SU EMPRESA
     const user = await prisma.user.findFirst({
       where: { OR: [{ id: userId }, { dni: userId }] },
-      include: { company: true, homeAddresses: true },
+      include: { company: true, homeAddresses: true, payrollPolicy: true },
     });
 
     if (!user) {
@@ -36,6 +43,13 @@ export async function POST(req: NextRequest) {
         { status: 404 }
       );
     }
+
+    const company = user.company;
+    const lunchWindowStartStr = company.lunchWindowStart || '13:00';
+    const lunchWindowEndStr = company.lunchWindowEnd || '13:30';
+    const lunchDurationMinutes = company.lunchDurationMinutes ?? 60;
+    const lunchDays = Array.isArray(company.lunchDays) ? company.lunchDays : [1, 2, 3, 4, 5];
+    const saturdayWorkHours = company.saturdayWorkHours ?? 4.5;
 
     // 1.1. VERIFICAR QUE EL PERÍODO DE PLANILLA NO ESTÉ CERRADO
     await assertPeriodIsOpen(today, user.companyId);
@@ -46,7 +60,7 @@ export async function POST(req: NextRequest) {
     let homeOfficeRemaining = 0;
 
     if (type === 'PRESENTIAL_QR') {
-      if (!qrContent || qrContent !== user.company.qrSecret) {
+      if (!qrContent || qrContent !== company.qrSecret) {
         return NextResponse.json(
           { error: 'Código QR de oficina inválido' },
           { status: 400 }
@@ -54,16 +68,25 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (['PRESENTIAL_QR', 'PRESENTIAL_NFC', 'BIOMETRIC_FINGERPRINT', 'FACIAL_RECOGNITION'].includes(type)) {
+    if (
+      [
+        'PRESENTIAL_QR',
+        'PRESENTIAL_NFC',
+        'BIOMETRIC_FINGERPRINT',
+        'FACIAL_RECOGNITION',
+      ].includes(type)
+    ) {
       const distance = calculateDistanceInMeters(
         latitude,
         longitude,
-        user.company.officeLat,
-        user.company.officeLng
+        company.officeLat,
+        company.officeLng
       );
-      if (distance > user.company.radiusM) {
+      if (distance > company.radiusM) {
         return NextResponse.json(
-          { error: `Fuera del rango de la oficina: ${Math.round(distance)}m (Límite: ${user.company.radiusM}m)` },
+          {
+            error: `Fuera del rango de la oficina: ${Math.round(distance)}m (Límite: ${company.radiusM}m)`,
+          },
           { status: 403 }
         );
       }
@@ -75,8 +98,19 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const startOfMonth = new Date(serverTimestamp.getFullYear(), serverTimestamp.getMonth(), 1);
-      const endOfMonth = new Date(serverTimestamp.getFullYear(), serverTimestamp.getMonth() + 1, 0, 23, 59, 59);
+      const startOfMonth = new Date(
+        serverTimestamp.getFullYear(),
+        serverTimestamp.getMonth(),
+        1
+      );
+      const endOfMonth = new Date(
+        serverTimestamp.getFullYear(),
+        serverTimestamp.getMonth() + 1,
+        0,
+        23,
+        59,
+        59
+      );
 
       const homeOfficeCount = await prisma.attendanceRecord.count({
         where: {
@@ -86,21 +120,34 @@ export async function POST(req: NextRequest) {
         },
       });
 
-      if (homeOfficeCount >= user.homeOfficeQuota && (actionType === 'CHECK_IN' || !actionType)) {
+      if (
+        homeOfficeCount >= user.homeOfficeQuota &&
+        (actionType === 'CHECK_IN' || !actionType)
+      ) {
         return NextResponse.json(
-          { error: `Excedió su cuota mensual de Home Office (${user.homeOfficeQuota} días).` },
+          {
+            error: `Excedió su cuota mensual de Home Office (${user.homeOfficeQuota} días).`,
+          },
           { status: 403 }
         );
       }
 
       const enRango = user.homeAddresses.some((addr) => {
-        const dist = calculateDistanceInMeters(latitude, longitude, addr.latitude, addr.longitude);
+        const dist = calculateDistanceInMeters(
+          latitude,
+          longitude,
+          addr.latitude,
+          addr.longitude
+        );
         return dist <= 50.0;
       });
 
       if (!enRango) {
         return NextResponse.json(
-          { error: 'No se encuentra en el rango de ninguno de sus domicilios registrados (Límite 50m).' },
+          {
+            error:
+              'No se encuentra en el rango de ninguno de sus domicilios registrados (Límite 50m).',
+          },
           { status: 403 }
         );
       }
@@ -117,7 +164,7 @@ export async function POST(req: NextRequest) {
 
     const currentAction = actionType || 'CHECK_IN';
 
-    // A) REGISTRO DE INGRESO (CHECK_IN) - TOLERANCIA DEDUCIBLE
+    // A) REGISTRO DE INGRESO (CHECK_IN)
     if (currentAction === 'CHECK_IN') {
       if (record) {
         return NextResponse.json(
@@ -126,25 +173,26 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      // VALIDACIÓN LEY DE TELETRABAJO: Desconexión Digital (12 horas mínimas continuas)
       const lastRecord = await prisma.attendanceRecord.findFirst({
         where: { userId: user.id, checkOut: { not: null } },
         orderBy: { checkOut: 'desc' },
       });
 
       if (lastRecord && lastRecord.checkOut) {
-        const restMs = serverTimestamp.getTime() - lastRecord.checkOut.getTime();
+        const restMs =
+          serverTimestamp.getTime() - lastRecord.checkOut.getTime();
         const restHours = restMs / (1000 * 60 * 60);
         if (restHours < 12) {
           const remainingMinutes = Math.ceil((12 - restHours) * 60);
           return NextResponse.json(
-            { error: `Infracción a la Ley de Teletrabajo: Debe cumplir 12 horas continuas de desconexión digital. Le faltan ${remainingMinutes} minuto(s).` },
+            {
+              error: `Infracción a la Ley de Teletrabajo: Debe cumplir 12 horas continuas de desconexión digital. Le faltan ${remainingMinutes} minuto(s).`,
+            },
             { status: 403 }
           );
         }
       }
 
-      // Cálculo de Tardanza con Tolerancia Deducible
       const [workHour, workMin] = user.workStartTime.split(':').map(Number);
       const graceLimitTime = new Date(serverTimestamp);
       graceLimitTime.setHours(workHour, workMin + user.toleranceMinutes, 0, 0);
@@ -160,7 +208,6 @@ export async function POST(req: NextRequest) {
         const diffMs = serverTimestamp.getTime() - expectedTime.getTime();
         const totalLateMinutes = Math.floor(diffMs / (1000 * 60));
 
-        // Descontar la tolerancia del tiempo total de tardanza
         lateMinutes = Math.max(0, totalLateMinutes - user.toleranceMinutes);
       }
 
@@ -184,37 +231,59 @@ export async function POST(req: NextRequest) {
         message: 'Entrada registrada con éxito',
         status: record.status,
         lateMinutes,
-        homeOfficeRemaining: type === 'HOME_OFFICE' ? homeOfficeRemaining : undefined,
+        homeOfficeRemaining:
+          type === 'HOME_OFFICE' ? homeOfficeRemaining : undefined,
         record,
       });
     }
 
-    // B) INICIO DE REFRIGERIO (LUNCH_START) - VENTANA DE 1:00 PM A 1:30 PM
+    // B) INICIO DE REFRIGERIO (LUNCH_START) - VENTANA DINÁMICA DE EMPRESA
     else if (currentAction === 'LUNCH_START') {
       if (!record) {
-        return NextResponse.json({ error: 'Debe marcar su entrada primero.' }, { status: 400 });
-      }
-      if (record.lunchStart) {
-        return NextResponse.json({ error: 'Ya registró inicio de refrigerio el día de hoy.' }, { status: 400 });
+        return NextResponse.json(
+          { error: 'Debe marcar su entrada primero.' },
+          { status: 400 }
+        );
       }
 
-      // Validar ventana horaria (13:00 a 13:30)
+      if (record.lunchStart) {
+        return NextResponse.json(
+          { error: 'Ya registró inicio de refrigerio el día de hoy.' },
+          { status: 400 }
+        );
+      }
+
+      const dayOfWeek = serverTimestamp.getDay(); // 0=Dom ... 6=Sáb
+      if (!lunchDays.includes(dayOfWeek)) {
+        return NextResponse.json(
+          { error: 'El día de hoy no contempla turno de refrigerio según la política de la empresa.' },
+          { status: 400 }
+        );
+      }
+
+      const [winStartH, winStartM] = parseTimeHHMM(lunchWindowStartStr, 13, 0);
+      const [winEndH, winEndM] = parseTimeHHMM(lunchWindowEndStr, 13, 30);
+
       const windowStart = new Date(serverTimestamp);
-      windowStart.setHours(13, 0, 0, 0); // 1:00 PM
+      windowStart.setHours(winStartH, winStartM, 0, 0);
 
       const windowEnd = new Date(serverTimestamp);
-      windowEnd.setHours(13, 30, 0, 0); // 1:30 PM
+      windowEnd.setHours(winEndH, winEndM, 0, 0);
 
       if (serverTimestamp < windowStart) {
         return NextResponse.json(
-          { error: 'El horario permitido para iniciar el refrigerio es a partir de la 1:00 PM.' },
+          {
+            error: `El horario permitido para iniciar el refrigerio es a partir de las ${lunchWindowStartStr}.`,
+          },
           { status: 400 }
         );
       }
 
       if (serverTimestamp > windowEnd) {
         return NextResponse.json(
-          { error: 'Ha superado la hora límite para salir a refrigerio (Máximo 1:30 PM).' },
+          {
+            error: `Ha superado la hora límite para salir a refrigerio (Máximo ${lunchWindowEndStr}).`,
+          },
           { status: 400 }
         );
       }
@@ -227,36 +296,44 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         action: 'LUNCH_START',
-        message: 'Inicio de refrigerio registrado con éxito. Recuerde que su tiempo de refrigerio es de 60 minutos.',
+        message: `Inicio de refrigerio registrado con éxito. Su tiempo de refrigerio es de ${lunchDurationMinutes} minutos.`,
+        lunchDurationMinutes,
         record,
       });
     }
 
-    // C) FIN DE REFRIGERIO (LUNCH_END) - VALIDACIÓN DE 60 MINUTOS Y CONTROL DE EXCESOS
+    // C) FIN DE REFRIGERIO (LUNCH_END) - DURACIÓN DINÁMICA DE EMPRESA
     else if (currentAction === 'LUNCH_END') {
       if (!record || !record.lunchStart) {
-        return NextResponse.json({ error: 'No ha registrado inicio de refrigerio previamente.' }, { status: 400 });
+        return NextResponse.json(
+          { error: 'No ha registrado inicio de refrigerio previamente.' },
+          { status: 400 }
+        );
       }
       if (record.lunchEnd) {
-        return NextResponse.json({ error: 'Ya registró fin de refrigerio el día de hoy.' }, { status: 400 });
-      }
-
-      const { totalLunchMinutes, excessMinutes } = calculateLunchExcessMinutes(
-        record.lunchStart,
-        serverTimestamp,
-        60 // 60 minutos obligatorios de refrigerio
-      );
-
-      // 1. No permitir reingreso antes de cumplir los 60 minutos establecidos
-      if (totalLunchMinutes < 60) {
-        const remaining = 60 - totalLunchMinutes;
         return NextResponse.json(
-          { error: `Su tiempo de refrigerio configurado es de 60 minutos (1 hora). Le faltan ${remaining} minuto(s).` },
+          { error: 'Ya registró fin de refrigerio el día de hoy.' },
           { status: 400 }
         );
       }
 
-      // 2. Si excedió los 60 minutos, sumar la demora a lateMinutes y registrar observación
+      const requiredMinutes = lunchDurationMinutes;
+      const { totalLunchMinutes, excessMinutes } = calculateLunchExcessMinutes(
+        record.lunchStart,
+        serverTimestamp,
+        requiredMinutes
+      );
+
+      if (totalLunchMinutes < requiredMinutes) {
+        const remaining = requiredMinutes - totalLunchMinutes;
+        return NextResponse.json(
+          {
+            error: `Su tiempo de refrigerio obligatorio es de ${requiredMinutes} minutos. Le faltan ${remaining} minuto(s).`,
+          },
+          { status: 400 }
+        );
+      }
+
       const updatedLateMinutes = (record.lateMinutes || 0) + excessMinutes;
       const updatedStatus = excessMinutes > 0 ? 'LATE' : record.status;
       const lunchObservation =
@@ -286,30 +363,63 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // D) REGISTRO DE SALIDA (CHECK_OUT) - CÁLCULO SOBRETASAS LEY N° 28999 DESDE HORA OFICIAL
+    // D) REGISTRO DE SALIDA (CHECK_OUT)
     else if (currentAction === 'CHECK_OUT') {
       if (!record || !record.checkIn) {
-        return NextResponse.json({ error: 'Debe marcar su entrada primero.' }, { status: 400 });
+        return NextResponse.json(
+          { error: 'Debe marcar su entrada primero.' },
+          { status: 400 }
+        );
       }
       if (record.checkOut) {
-        return NextResponse.json({ error: 'Ya registró su salida el día de hoy.' }, { status: 400 });
+        return NextResponse.json(
+          { error: 'Ya registró su salida el día de hoy.' },
+          { status: 400 }
+        );
       }
 
-      // 1. Obtener la hora oficial de entrada asignada al trabajador (ej. "09:00")
       const [workHour, workMin] = user.workStartTime.split(':').map(Number);
+      const dayOfWeek = record.date.getDay();
+      const isSaturday = dayOfWeek === 6;
+      const hasLunchToday = lunchDays.includes(dayOfWeek);
+      const userHoursPerDay = user.payrollPolicy?.hoursPerDay || 8.0;
 
-      // 2. Definir la hora oficial de salida teórica (Entrada + 8h trabajo + 1h refrigerio = Entrada + 9h)
+      const effectiveDayHours = isSaturday ? saturdayWorkHours : userHoursPerDay;
+      const lunchMinutesToday = hasLunchToday ? lunchDurationMinutes : 0;
+
       const officialCheckOut = new Date(record.date);
-      officialCheckOut.setHours(workHour + 9, workMin, 0, 0);
+      officialCheckOut.setHours(workHour, workMin, 0, 0);
+      officialCheckOut.setMinutes(
+        officialCheckOut.getMinutes() + Math.round(effectiveDayHours * 60) + lunchMinutesToday
+      );
 
-      // 3. Las Horas Extras comienzan a contarse ÚNICAMENTE después de pasar la hora oficial de salida
+      const [winStartH, winStartM] = parseTimeHHMM(lunchWindowStartStr, 13, 0);
+      const defaultLunchStart = new Date(record.date);
+      defaultLunchStart.setHours(winStartH, winStartM, 0, 0);
+
+      const defaultLunchEnd = new Date(defaultLunchStart);
+      defaultLunchEnd.setMinutes(defaultLunchEnd.getMinutes() + lunchDurationMinutes);
+
+      const shouldAutoAssignLunch =
+        hasLunchToday &&
+        !record.lunchStart &&
+        !record.lunchEnd &&
+        record.checkIn < defaultLunchStart &&
+        serverTimestamp > defaultLunchEnd;
+
+      const finalLunchStart = shouldAutoAssignLunch
+        ? defaultLunchStart
+        : record.lunchStart;
+      const finalLunchEnd = shouldAutoAssignLunch
+        ? defaultLunchEnd
+        : record.lunchEnd;
+
       let totalOvertimeMinutes = 0;
       if (serverTimestamp > officialCheckOut) {
         const diffMs = serverTimestamp.getTime() - officialCheckOut.getTime();
         totalOvertimeMinutes = Math.floor(diffMs / (1000 * 60));
       }
 
-      // 4. Desglose en tramos del 25% (primeras 2 horas) y 35% (a partir de la 3ra hora)
       let overtime25Minutes = 0;
       let overtime35Minutes = 0;
 
@@ -322,6 +432,8 @@ export async function POST(req: NextRequest) {
         where: { id: record.id },
         data: {
           checkOut: serverTimestamp,
+          lunchStart: finalLunchStart,
+          lunchEnd: finalLunchEnd,
           overtimeMinutes: totalOvertimeMinutes,
           overtime25Minutes,
           overtime35Minutes,
@@ -340,7 +452,10 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ error: 'Acción de marcación no válida.' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Acción de marcación no válida.' },
+      { status: 400 }
+    );
   } catch (error: any) {
     console.error('❌ Error interno en la API de Marcación:', error);
     return NextResponse.json(

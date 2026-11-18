@@ -2,7 +2,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Users, UserPlus, Search, Edit, ShieldCheck, Sliders } from 'lucide-react';
+import { Users, UserPlus, Search, Edit, ShieldCheck, Sliders, Fingerprint } from 'lucide-react';
 
 interface PayrollPolicyOption {
   id: string;
@@ -15,6 +15,9 @@ interface PayrollPolicyOption {
 interface User {
   id: string;
   dni: string;
+  biometricCode?: string | null;
+  role?: 'EMPLOYEE' | 'HR' | 'ADMIN';
+  isSubjectToSupervision?: boolean;
   name: string;
   lastName: string;
   email: string;
@@ -38,6 +41,9 @@ export default function UsersAdminPage() {
 
   const [formData, setFormData] = useState({
     dni: '',
+    biometricCode: '',
+    role: 'EMPLOYEE' as 'EMPLOYEE' | 'HR' | 'ADMIN',
+    isSubjectToSupervision: true,
     name: '',
     lastName: '',
     email: '',
@@ -80,6 +86,9 @@ export default function UsersAdminPage() {
     setEditingUser(null);
     setFormData({
       dni: '',
+      biometricCode: '',
+      role: 'EMPLOYEE',
+      isSubjectToSupervision: true,
       name: '',
       lastName: '',
       email: '',
@@ -97,6 +106,9 @@ export default function UsersAdminPage() {
     setEditingUser(user);
     setFormData({
       dni: user.dni,
+      biometricCode: user.biometricCode || '',
+      role: user.role || 'EMPLOYEE',
+      isSubjectToSupervision: user.isSubjectToSupervision ?? true,
       name: user.name,
       lastName: user.lastName,
       email: user.email,
@@ -137,7 +149,7 @@ export default function UsersAdminPage() {
       } else {
         alert(data.details || data.error || 'Error procesando la solicitud');
       }
-    } catch (err) {
+    } catch {
       alert('Error de conexión con el servidor');
     }
   };
@@ -152,6 +164,28 @@ export default function UsersAdminPage() {
   const inputClass =
     'w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-xs text-white placeholder:text-slate-500 focus:border-[#00BFA5] focus:outline-none focus:ring-1 focus:ring-[#00BFA5] font-semibold';
 
+  const getRoleBadge = (role?: string) => {
+    if (role === 'ADMIN') {
+      return (
+        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-950/80 text-indigo-300 border border-indigo-800/60">
+          Gerencia / Admin
+        </span>
+      );
+    }
+    if (role === 'HR') {
+      return (
+        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-800/60">
+          RRHH
+        </span>
+      );
+    }
+    return (
+      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800">
+        Trabajador
+      </span>
+    );
+  };
+
   return (
     <div className="space-y-6">
       {/* ENCABEZADO */}
@@ -162,7 +196,7 @@ export default function UsersAdminPage() {
             Administración de Personal y Parámetros Laborales
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Gestión de fichas de colaboradores y asignación centralizada de regímenes laborales.
+            Gestión de fichas de colaboradores, roles y control de fiscalización SUNAFIL.
           </p>
         </div>
         <button
@@ -192,7 +226,7 @@ export default function UsersAdminPage() {
           <thead className="bg-slate-900/80 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
             <tr>
               <th className="px-5 py-3.5">Trabajador / Documento</th>
-              <th className="px-5 py-3.5">Cargo / Puesto</th>
+              <th className="px-5 py-3.5">Cargo / Rol y Fiscalización</th>
               <th className="px-5 py-3.5">Régimen Laboral</th>
               <th className="px-5 py-3.5">Ingreso / Tolerancia</th>
               <th className="px-5 py-3.5">Home Office</th>
@@ -214,60 +248,84 @@ export default function UsersAdminPage() {
                 </td>
               </tr>
             ) : (
-              filteredUsers.map((u) => (
-                <tr key={u.id} className="hover:bg-slate-900/50 transition">
-                  <td className="px-5 py-3.5 font-semibold text-white">
-                    {u.name} {u.lastName}
-                    <div className="text-[10px] font-mono text-slate-500">DNI: {u.dni}</div>
-                  </td>
-                  <td className="px-5 py-3.5 text-slate-300">{u.jobTitle || 'Especialista'}</td>
-                  <td className="px-5 py-3.5">
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-slate-900 text-[#00BFA5] px-2 py-1 rounded border border-[#00BFA5]/30">
-                      <Sliders className="w-3 h-3" />
-                      {u.payrollPolicy?.name || 'Asignar Estándar General'}
-                    </span>
-                  </td>
-                  <td className="px-5 py-3.5 font-mono">
-                    <span className="text-slate-200 font-bold">{u.workStartTime}</span>
-                    <span className="ml-2 rounded bg-amber-950/60 text-amber-400 border border-amber-800/50 px-2 py-0.5 text-[10px] font-bold">
-                      +{u.toleranceMinutes}m tol
-                    </span>
-                  </td>
-                  <td className="px-5 py-3.5">
-                    <span className="bg-slate-900 text-slate-300 font-bold px-2 py-1 rounded border border-slate-800">
-                      {u.homeOfficeQuota ?? 4} días/mes
-                    </span>
-                  </td>
-                  <td className="px-5 py-3.5 font-mono font-bold text-white">
-                    S/ {u.baseSalary?.toLocaleString('es-PE', { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="px-5 py-3.5 text-right">
-                    <button
-                      onClick={() => handleOpenEdit(u)}
-                      className="inline-flex items-center gap-1 text-slate-300 hover:text-[#00BFA5] bg-slate-900 hover:bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 transition"
-                    >
-                      <Edit className="w-3.5 h-3.5" />
-                      <span>Editar</span>
-                    </button>
-                  </td>
-                </tr>
-              ))
+              filteredUsers.map((u) => {
+                const isSupervised = u.isSubjectToSupervision ?? true;
+                return (
+                  <tr key={u.id} className="hover:bg-slate-900/50 transition">
+                    <td className="px-5 py-3.5 font-semibold text-white">
+                      {u.name} {u.lastName}
+                      <div className="flex items-center gap-2 mt-0.5 text-[10px] font-mono text-slate-500">
+                        <span>DNI: {u.dni}</span>
+                        {u.biometricCode && (
+                          <span className="inline-flex items-center gap-0.5 text-[#00BFA5]">
+                            <Fingerprint className="w-3 h-3" /> #{u.biometricCode}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <div className="text-slate-200 font-medium">{u.jobTitle || 'Especialista'}</div>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                        {getRoleBadge(u.role)}
+                        {isSupervised ? (
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-950/70 text-emerald-400 border border-emerald-800/50">
+                            Fiscalizado
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-800/50">
+                            Exonerado (Art. 5)
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-slate-900 text-[#00BFA5] px-2 py-1 rounded border border-[#00BFA5]/30">
+                        <Sliders className="w-3 h-3" />
+                        {u.payrollPolicy?.name || 'Asignar Estándar General'}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3.5 font-mono">
+                      <span className="text-slate-200 font-bold">{u.workStartTime}</span>
+                      <span className="ml-2 rounded bg-amber-950/60 text-amber-400 border border-amber-800/50 px-2 py-0.5 text-[10px] font-bold">
+                        +{u.toleranceMinutes}m tol
+                      </span>
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <span className="bg-slate-900 text-slate-300 font-bold px-2 py-1 rounded border border-slate-800">
+                        {u.homeOfficeQuota ?? 4} días/mes
+                      </span>
+                    </td>
+                    <td className="px-5 py-3.5 font-mono font-bold text-white">
+                      S/ {u.baseSalary?.toLocaleString('es-PE', { minimumFractionDigits: 2 })}
+                    </td>
+                    <td className="px-5 py-3.5 text-right">
+                      <button
+                        onClick={() => handleOpenEdit(u)}
+                        className="inline-flex items-center gap-1 text-slate-300 hover:text-[#00BFA5] bg-slate-900 hover:bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 transition"
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                        <span>Editar</span>
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
       </div>
 
-      {/* MODAL SIMPLIFICADO */}
+      {/* MODAL DE REGISTRO Y EDICIÓN */}
       {showModal && (
         <div className="fixed inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 z-50">
-          <div className="w-full max-w-lg rounded-2xl bg-slate-950 p-6 shadow-2xl border border-slate-800 text-slate-200 space-y-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slate-950 p-6 shadow-2xl border border-slate-800 text-slate-200 space-y-4 max-h-[92vh] overflow-y-auto">
             <div>
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 <ShieldCheck className="w-5 h-5 text-[#00BFA5]" />
                 {editingUser ? `Editar Parámetros: ${editingUser.name}` : 'Registrar Nuevo Trabajador'}
               </h2>
               <p className="text-xs text-slate-400 mt-1">
-                Configure el puesto, sueldo base y asigne el régimen laboral correspondiente.
+                Configure el rol, fiscalización de asistencia, sueldo base y régimen laboral.
               </p>
             </div>
 
@@ -327,13 +385,70 @@ export default function UsersAdminPage() {
                 <label className="text-[11px] font-bold text-slate-300 block mb-1">Cargo / Puesto</label>
                 <input
                   type="text"
-                  placeholder="Ej: Especialista de Ciberseguridad"
+                  placeholder="Ej: Especialista de Ciberseguridad / Gerente"
                   required
                   className={inputClass}
                   value={formData.jobTitle}
                   onChange={(e) => setFormData({ ...formData, jobTitle: e.target.value })}
                 />
               </div>
+
+              {/* ROL EN EL SISTEMA Y CÓDIGO BIOMÉTRICO */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                    Rol en el Sistema
+                  </label>
+                  <select
+                    className={inputClass}
+                    value={formData.role}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        role: e.target.value as 'EMPLOYEE' | 'HR' | 'ADMIN',
+                      })
+                    }
+                  >
+                    <option value="EMPLOYEE">Trabajador (Estándar)</option>
+                    <option value="HR">Recursos Humanos (RRHH)</option>
+                    <option value="ADMIN">Gerencia / Administrador</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                    ID Reloj Biométrico (EnNo)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ej: 00000001"
+                    className={`${inputClass} font-mono`}
+                    value={formData.biometricCode}
+                    onChange={(e) => setFormData({ ...formData, biometricCode: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              {/* CONTROL DE FISCALIZACIÓN D.S. N° 004-2006-TR */}
+              <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-800 bg-slate-900/70 cursor-pointer hover:border-[#00BFA5]/50 transition">
+                <input
+                  type="checkbox"
+                  checked={formData.isSubjectToSupervision}
+                  onChange={(e) =>
+                    setFormData({ ...formData, isSubjectToSupervision: e.target.checked })
+                  }
+                  className="mt-0.5 w-4 h-4 accent-[#00BFA5] cursor-pointer shrink-0"
+                />
+                <div>
+                  <span className="text-xs font-bold text-white block">
+                    Sujeto a Fiscalización de Asistencia (D.S. N° 004-2006-TR)
+                  </span>
+                  <span className="text-[11px] text-slate-400 block mt-0.5">
+                    {formData.isSubjectToSupervision
+                      ? 'Activo: Marca ingreso/salida y genera tardanzas o faltas injustificadas si no asiste.'
+                      : 'Exonerado (Art. 5): Personal de dirección / no fiscalizado. No genera faltas automáticas.'}
+                  </span>
+                </div>
+              </label>
 
               {/* ASIGNACIÓN CENTRALIZADA DE RÉGIMEN */}
               <div className="pt-2 border-t border-slate-800">

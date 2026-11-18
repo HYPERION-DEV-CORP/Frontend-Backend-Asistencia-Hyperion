@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Respuesta conservando exactamente la estructura previa + role y companyId
+    // Respuesta conservando exactamente la estructura previa + companyConfig dinámico
     const response = NextResponse.json({
       success: true,
       user: {
@@ -94,9 +94,15 @@ export async function POST(req: NextRequest) {
         companyId: user.companyId,
         role: user.role,
       },
+      companyConfig: {
+        lunchWindowStart: user.company.lunchWindowStart ?? '13:00',
+        lunchWindowEnd: user.company.lunchWindowEnd ?? '13:30',
+        lunchDurationMinutes: user.company.lunchDurationMinutes ?? 60,
+        lunchDays: user.company.lunchDays ?? [1, 2, 3, 4, 5],
+        saturdayWorkHours: user.company.saturdayWorkHours ?? 4.5,
+      },
     });
 
-    // Establecer cookie solo si ingresa al panel gerencial (o para ambos si lo deseas)
     if (portal === 'ADMIN' || user.role === 'ADMIN' || user.role === 'HR') {
       response.cookies.set('hyperion_session', token, {
         httpOnly: true,

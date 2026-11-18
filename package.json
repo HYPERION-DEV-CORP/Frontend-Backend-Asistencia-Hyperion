@@ -4,11 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "cross-env NODE_OPTIONS=--insecure-http-parser next dev",
-    "build": "cross-env NODE_OPTIONS=--insecure-http-parser next build",
-    "start": "cross-env NODE_OPTIONS=--insecure-http-parser next start",
+    "build": "prisma generate && cross-env NODE_OPTIONS=--insecure-http-parser next build",
+    "start": "npx prisma migrate deploy && cross-env NODE_OPTIONS=--insecure-http-parser next start",
+    "postinstall": "prisma generate",
     "lint": "next lint"
   },
   "dependencies": {
+    "@prisma/client": "^5.18.0",
     "axios": "^1.20.0",
     "bcryptjs": "^3.0.3",
     "exceljs": "^4.4.0",
@@ -24,7 +26,6 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@prisma/client": "^5.18.0",
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
     "@types/jsonwebtoken": "^9.0.10",
