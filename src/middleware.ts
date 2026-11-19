@@ -32,11 +32,13 @@ export async function middleware(req: NextRequest) {
     return applyCorsHeaders(new NextResponse(null, { status: 204 }), origin);
   }
 
-  // 2. Rutas públicas de API usadas por la App Móvil / Web (Login, Marcaciones, Estado del día, Domicilios)
+  // 2. Rutas públicas de API usadas por la App Móvil / Web (Login, Recuperación, Perfil/Firma, Marcaciones, Tareo SUNAFIL, Domicilios)
   const isPublicMobileApi =
     pathname.startsWith('/api/v1/auth/') ||
     pathname.startsWith('/api/v1/attendance') ||
     pathname.startsWith('/api/v1/home-addresses') ||
+    pathname.startsWith('/api/v1/user/') ||
+    pathname.startsWith('/api/v1/reports/attendance-sheet') ||
     (pathname === '/api/v1/hr/permissions' && method === 'POST');
 
   if (isPublicMobileApi) {
