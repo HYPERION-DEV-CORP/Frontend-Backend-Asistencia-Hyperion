@@ -82,17 +82,20 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Respuesta conservando exactamente la estructura previa + companyConfig dinámico
+    // Respuesta conservando exactamente la estructura previa + companyConfig dinámico + estado de firma
     const response = NextResponse.json({
       success: true,
+      token,
       user: {
         id: user.id,
         dni: user.dni,
+        email: user.email,
         name: `${user.name} ${user.lastName}`,
         jobTitle: user.jobTitle,
         companyName: user.company.name,
         companyId: user.companyId,
         role: user.role,
+        hasSignature: Boolean(user.signatureBase64),
       },
       companyConfig: {
         lunchWindowStart: user.company.lunchWindowStart ?? '13:00',

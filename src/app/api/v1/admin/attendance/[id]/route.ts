@@ -25,12 +25,13 @@ export async function PUT(
       newLunchStart,
       newLunchEnd,
       newCheckOut,
+      isHoliday,
+      tareoObservation,
       reason,
       documentUrl,
       adminId,
     } = body;
 
-    // 1. Validación de motivo exigido por SUNAFIL
     if (!reason || !reason.trim() || reason.trim().length < 10) {
       return NextResponse.json(
         {
@@ -51,7 +52,6 @@ export async function PUT(
       );
     }
 
-    // 2. Consulta de la marcación previa (incluyendo company y payrollPolicy)
     const rawRecord = await prisma.attendanceRecord.findUnique({
       where: { id: recordId },
       include: {
@@ -74,22 +74,27 @@ export async function PUT(
     const record = rawRecord as typeof rawRecord & { user: any };
     const user = record.user;
 
-    // 3. Bloqueo de Periodos Cerrados
     await assertPeriodIsOpen(record.date, user.companyId);
 
-    // 3.1. Bloquear edición si existe una papeleta aprobada SIN GOCE que afecte la jornada de ese día
     const recordDateStr = new Date(record.date).toISOString().split("T")[0];
+    const dayOfWeek = new Date(record.date).getUTCDay();
+    if (dayOfWeek === 0) {
+      return NextResponse.json(
+        { error: "Los días domingo corresponden siempre a Descanso Semanal y no son editables." },
+        { status: 400 },
+      );
+    }
+
     const [wH, wM] = (user.workStartTime || "09:00").split(":").map(Number);
     const userHoursPerDay = user.payrollPolicy?.hoursPerDay || 8.0;
     const configuredLunchMinutes = user.company?.lunchDurationMinutes ?? 60;
-    const isSaturday = new Date(record.date).getUTCDay() === 6;
+    const isSaturday = dayOfWeek === 6;
 
     const effectiveDayHours = isSaturday
       ? (user.company?.saturdayWorkHours ?? 4.5)
       : userHoursPerDay;
     const lunchHours = isSaturday ? 0 : configuredLunchMinutes / 60;
 
-    // Inicio y fin del turno en hora Perú (UTC-5 -> +5h en UTC)
     const shiftStartUtc = new Date(
       `${recordDateStr}T${String(wH).padStart(2, "0")}:${String(wM).padStart(2, "0")}:00.000Z`,
     );
@@ -119,44 +124,50 @@ export async function PUT(
       );
     }
 
-    // Usamos directamente recordDateStr (YYYY-MM-DD) para evitar desfases de día por zona horaria
     const dateStr = recordDateStr;
+    const markAsHoliday = Boolean(isHoliday);
 
-    // 4. Reconstrucción de Fechas (permite editar solo ingreso sin rellenar refrigerio/salida, y también limpiar campos)
-    let updatedCheckIn = record.checkIn;
-    if (newCheckIn && typeof newCheckIn === "string" && newCheckIn.includes(":")) {
-      updatedCheckIn = new Date(`${dateStr}T${newCheckIn}:00.000`);
+    let updatedCheckIn = markAsHoliday ? null : record.checkIn;
+    if (!markAsHoliday) {
+      if (newCheckIn === null || newCheckIn === "") {
+        updatedCheckIn = null;
+      } else if (typeof newCheckIn === "string" && newCheckIn.includes(":")) {
+        updatedCheckIn = new Date(`${dateStr}T${newCheckIn}:00.000`);
+      }
     }
 
-    let updatedLunchStart = record.lunchStart;
-    if (newLunchStart === null || newLunchStart === "") {
-      updatedLunchStart = null;
-    } else if (typeof newLunchStart === "string" && newLunchStart.includes(":")) {
-      updatedLunchStart = new Date(`${dateStr}T${newLunchStart}:00.000`);
+    let updatedLunchStart = markAsHoliday ? null : record.lunchStart;
+    if (!markAsHoliday) {
+      if (newLunchStart === null || newLunchStart === "") {
+        updatedLunchStart = null;
+      } else if (typeof newLunchStart === "string" && newLunchStart.includes(":")) {
+        updatedLunchStart = new Date(`${dateStr}T${newLunchStart}:00.000`);
+      }
     }
 
-    let updatedLunchEnd = record.lunchEnd;
-    if (newLunchEnd === null || newLunchEnd === "") {
-      updatedLunchEnd = null;
-    } else if (typeof newLunchEnd === "string" && newLunchEnd.includes(":")) {
-      updatedLunchEnd = new Date(`${dateStr}T${newLunchEnd}:00.000`);
+    let updatedLunchEnd = markAsHoliday ? null : record.lunchEnd;
+    if (!markAsHoliday) {
+      if (newLunchEnd === null || newLunchEnd === "") {
+        updatedLunchEnd = null;
+      } else if (typeof newLunchEnd === "string" && newLunchEnd.includes(":")) {
+        updatedLunchEnd = new Date(`${dateStr}T${newLunchEnd}:00.000`);
+      }
     }
 
-    let updatedCheckOut = record.checkOut;
-    if (newCheckOut === null || newCheckOut === "") {
-      updatedCheckOut = null;
-    } else if (typeof newCheckOut === "string" && newCheckOut.includes(":")) {
-      updatedCheckOut = new Date(`${dateStr}T${newCheckOut}:00.000`);
+    let updatedCheckOut = markAsHoliday ? null : record.checkOut;
+    if (!markAsHoliday) {
+      if (newCheckOut === null || newCheckOut === "") {
+        updatedCheckOut = null;
+      } else if (typeof newCheckOut === "string" && newCheckOut.includes(":")) {
+        updatedCheckOut = new Date(`${dateStr}T${newCheckOut}:00.000`);
+      }
     }
 
-    // 5. Cálculo de Tardanza por Ingreso
     let lateMinutes = 0;
-    let status: "PRESENT" | "LATE" = "PRESENT";
+    let status: "PRESENT" | "LATE" | "HOLIDAY" = markAsHoliday ? "HOLIDAY" : "PRESENT";
 
-    if (updatedCheckIn && user.workStartTime) {
-      const [startHours, startMinutes] = user.workStartTime
-        .split(":")
-        .map(Number);
+    if (!markAsHoliday && updatedCheckIn && user.workStartTime) {
+      const [startHours, startMinutes] = user.workStartTime.split(":").map(Number);
       const expectedStartTime = new Date(
         `${dateStr}T${String(startHours).padStart(2, "0")}:${String(startMinutes).padStart(2, "0")}:00.000`,
       );
@@ -168,36 +179,33 @@ export async function PUT(
         status = "LATE";
         const diffMs = updatedCheckIn.getTime() - expectedStartTime.getTime();
         const totalLateMinutes = Math.floor(diffMs / (1000 * 60));
-        lateMinutes = Math.max(
-          0,
-          totalLateMinutes - (user.toleranceMinutes || 10),
-        );
+        lateMinutes = Math.max(0, totalLateMinutes - (user.toleranceMinutes || 10));
       }
     }
 
-    // 5.1. Control de Exceso de Refrigerio según duración configurada en la empresa (D.S. N° 007-2002-TR)
-    const { totalLunchMinutes, excessMinutes } = calculateLunchExcessMinutes(
-      updatedLunchStart,
-      updatedLunchEnd,
-      configuredLunchMinutes,
-    );
+    const { totalLunchMinutes, excessMinutes } = markAsHoliday
+      ? { totalLunchMinutes: 0, excessMinutes: 0 }
+      : calculateLunchExcessMinutes(
+          updatedLunchStart,
+          updatedLunchEnd,
+          configuredLunchMinutes,
+        );
 
-    if (excessMinutes > 0) {
+    if (!markAsHoliday && excessMinutes > 0) {
       lateMinutes += excessMinutes;
       status = "LATE";
     }
 
     const lunchNote =
-      excessMinutes > 0
+      !markAsHoliday && excessMinutes > 0
         ? ` | Exceso refrigerio: ${totalLunchMinutes} min (+${excessMinutes} min añadidos a tardanza)`
         : "";
 
-    // 6. Cálculo de Horas Extras (25% y 35%) según jornada del día y duración de refrigerio configurada
     let totalOvertimeMinutes = 0;
     let overtime25Minutes = 0;
     let overtime35Minutes = 0;
 
-    if (updatedCheckOut && user.workStartTime) {
+    if (!markAsHoliday && updatedCheckOut && user.workStartTime) {
       const [workHour, workMin] = user.workStartTime.split(":").map(Number);
       const totalShiftHours = effectiveDayHours + lunchHours;
 
@@ -216,20 +224,23 @@ export async function PUT(
       }
     }
 
-    const checkOutChanged =
-      record.checkOut?.getTime() !== updatedCheckOut?.getTime();
-    const isOvertimeApproved = checkOutChanged
-      ? false
-      : record.isOvertimeApproved;
+    const checkOutChanged = record.checkOut?.getTime() !== updatedCheckOut?.getTime();
+    const isOvertimeApproved = markAsHoliday || checkOutChanged ? false : record.isOvertimeApproved;
 
-    // Captura de metadatos forenses
+    // Observación manual limpia para Tareo SUNAFIL
+    const finalTareoObs =
+      typeof tareoObservation === "string"
+        ? tareoObservation.trim() || (markAsHoliday ? "FERIADO NO LABORABLE" : null)
+        : markAsHoliday
+          ? "FERIADO NO LABORABLE"
+          : record.tareoObservation;
+
     const ipAddress =
       req.headers.get("x-forwarded-for")?.split(",")[0] ||
       req.headers.get("x-real-ip") ||
       "127.0.0.1";
     const userAgent = req.headers.get("user-agent") || "Desconocido";
 
-    // 7. Transacción atómica: Actualización de marcación + Logs de auditoría
     const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.attendanceRecord.update({
         where: { id: recordId },
@@ -248,6 +259,7 @@ export async function PUT(
           hrModificationReason: reason.trim(),
           documentUrl: documentUrl || record.documentUrl,
           observations: `Editado por RRHH (${adminId}): ${reason.trim()}${lunchNote}`,
+          tareoObservation: finalTareoObs,
         },
       });
 
@@ -330,9 +342,9 @@ export async function PUT(
           performedById: adminId,
           entity: "ATTENDANCE_RECORD",
           entityId: recordId,
-          action: "RECTIFY_ATTENDANCE_AND_OVERTIME",
-          previousValue: `Tardanza: ${record.lateMinutes}m, HE: ${record.overtimeMinutes}m`,
-          newValue: `Tardanza: ${lateMinutes}m, HE: ${totalOvertimeMinutes}m (25%: ${overtime25Minutes}m, 35%: ${overtime35Minutes}m)`,
+          action: markAsHoliday ? "MARK_HOLIDAY_AND_OBSERVATION" : "RECTIFY_ATTENDANCE_AND_OVERTIME",
+          previousValue: `Estado: ${record.status}, Tardanza: ${record.lateMinutes}m, HE: ${record.overtimeMinutes}m`,
+          newValue: `Estado: ${status}, Tardanza: ${lateMinutes}m, HE: ${totalOvertimeMinutes}m, TareoObs: ${finalTareoObs || 'N/A'}`,
           reason: `${reason.trim()}${lunchNote}`,
           ipAddress,
         },
@@ -343,7 +355,7 @@ export async function PUT(
 
     return NextResponse.json({
       success: true,
-      message: "Marcación y Horas Extras recalculadas y auditadas exitosamente",
+      message: "Marcación y observación SUNAFIL actualizadas exitosamente",
       record: result,
     });
   } catch (error: any) {

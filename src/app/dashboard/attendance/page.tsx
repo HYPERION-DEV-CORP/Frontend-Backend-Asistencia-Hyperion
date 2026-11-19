@@ -24,6 +24,7 @@ interface AttendanceRecord {
   hrModificationReason: string | null;
   documentUrl?: string | null;
   observations?: string | null;
+  tareoObservation?: string | null;
 
   latitude: number;
   longitude: number;
@@ -89,9 +90,21 @@ export default function HRDashboard() {
   const [editLunchStart, setEditLunchStart] = useState('');
   const [editLunchEnd, setEditLunchEnd] = useState('');
   const [editCheckOut, setEditCheckOut] = useState('');
+  const [editIsHoliday, setEditIsHoliday] = useState(false);
+  const [editTareoObs, setEditTareoObs] = useState('');
   const [reason, setReason] = useState('');
   const [documentUrl, setDocumentUrl] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // Estados para Modal Rápido de Feriado / Observación (fechas sin marcación)
+  const [showHolidayModal, setShowHolidayModal] = useState(false);
+  const [holidayForm, setHolidayForm] = useState({
+    userId: 'ALL',
+    date: '',
+    isHoliday: true,
+    tareoObservation: 'FERIADO NO LABORABLE',
+  });
+  const [holidaySubmitting, setHolidaySubmitting] = useState(false);
 
   // Estados para Importación Biométrica (ALOG_001.txt)
   const [showBioModal, setShowBioModal] = useState(false);
@@ -109,7 +122,6 @@ export default function HRDashboard() {
 
   const loadData = async (runSilentAbsenceCheck = false) => {
     try {
-      // Ejecución silenciosa automática de faltas 1 vez al día al abrir la vista
       if (runSilentAbsenceCheck) {
         const todayKey = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString().split('T')[0];
         const lastAutoAudit = localStorage.getItem('hyperion_last_absence_audit');
@@ -347,18 +359,17 @@ export default function HRDashboard() {
     }
 
     setSelectedRecord(record);
-    // Solo precarga lo que ya existe en BD; si aún no marcó refrigerio o salida, quedan vacíos ('')
-    // para que el trabajador pueda marcarlos normalmente en la app móvil sin bloquear su jornada.
     setEditCheckIn(extractHoursAndMinutes(record.checkIn, '09:00'));
     setEditLunchStart(extractHoursAndMinutes(record.lunchStart, ''));
     setEditLunchEnd(extractHoursAndMinutes(record.lunchEnd, ''));
     setEditCheckOut(extractHoursAndMinutes(record.checkOut, ''));
+    setEditIsHoliday(record.status === 'HOLIDAY');
+    setEditTareoObs(record.tareoObservation || '');
     setReason('');
     setDocumentUrl(record.documentUrl || '');
     setShowEditModal(true);
   };
 
-  // Opción rápida para días pasados donde se requiere regularizar toda la jornada completa
   const handleRellenarJornadaCompleta = () => {
     if (!selectedRecord) return;
     const recordDate = new Date(
@@ -399,10 +410,12 @@ export default function HRDashboard() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          newCheckIn: editCheckIn || null,
-          newLunchStart: editLunchStart || null,
-          newLunchEnd: editLunchEnd || null,
-          newCheckOut: editCheckOut || null,
+          newCheckIn: editIsHoliday ? null : editCheckIn || null,
+          newLunchStart: editIsHoliday ? null : editLunchStart || null,
+          newLunchEnd: editIsHoliday ? null : editLunchEnd || null,
+          newCheckOut: editIsHoliday ? null : editCheckOut || null,
+          isHoliday: editIsHoliday,
+          tareoObservation: editTareoObs,
           reason: reason.trim(),
           documentUrl: documentUrl.trim() || null,
           adminId,
@@ -422,6 +435,40 @@ export default function HRDashboard() {
       alert('Error de comunicación con el servidor.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleGuardarFeriadoManual = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const storedUser = localStorage.getItem('user');
+    const adminId = storedUser ? JSON.parse(storedUser).id : null;
+    if (!adminId) {
+      alert('No se detectó la sesión del usuario administrador.');
+      return;
+    }
+
+    setHolidaySubmitting(true);
+    try {
+      const res = await fetch('/api/v1/admin/attendance/manual-note', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...holidayForm,
+          adminId,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        alert(data.message || 'Registro guardado exitosamente.');
+        setShowHolidayModal(false);
+        loadData(false);
+      } else {
+        alert(data.error || 'Error al registrar feriado u observación.');
+      }
+    } catch {
+      alert('Error de conexión con el servidor.');
+    } finally {
+      setHolidaySubmitting(false);
     }
   };
 
@@ -483,6 +530,21 @@ export default function HRDashboard() {
               🕵️ {auditingAbsences ? 'Auditando...' : 'Auditar Faltas'}
             </button>
           )}
+
+          <button
+            onClick={() => {
+              setHolidayForm({
+                userId: 'ALL',
+                date: '',
+                isHoliday: true,
+                tareoObservation: 'FERIADO NO LABORABLE',
+              });
+              setShowHolidayModal(true);
+            }}
+            className="flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-amber-700 transition text-sm cursor-pointer"
+          >
+            🎉 Feriado / Obs. Tareo
+          </button>
 
           <button
             onClick={downloadPdf}
@@ -658,10 +720,17 @@ export default function HRDashboard() {
               filteredRecords.map((rec) => {
                 const isLocked = checkIsPeriodClosed(rec.date);
                 const isAbsent = rec.status === 'ABSENT';
+                const isHoliday = rec.status === 'HOLIDAY';
                 return (
                   <tr
                     key={rec.id}
-                    className={isAbsent ? 'bg-rose-50/50 hover:bg-rose-50' : 'hover:bg-slate-50'}
+                    className={
+                      isHoliday
+                        ? 'bg-amber-50/60 hover:bg-amber-50'
+                        : isAbsent
+                        ? 'bg-rose-50/50 hover:bg-rose-50'
+                        : 'hover:bg-slate-50'
+                    }
                   >
                     <td className="px-6 py-4 font-medium text-slate-900 whitespace-nowrap">
                       {rec.date}
@@ -685,7 +754,11 @@ export default function HRDashboard() {
                     </td>
 
                     <td className="px-6 py-4">
-                      {isAbsent ? (
+                      {isHoliday ? (
+                        <span className="inline-block px-2.5 py-1 text-xs font-bold rounded-md bg-amber-100 text-amber-800 border border-amber-300">
+                          🎉 FERIADO NO LABORABLE
+                        </span>
+                      ) : isAbsent ? (
                         <span className="inline-block px-2.5 py-1 text-xs font-bold rounded-md bg-rose-100 text-rose-800 border border-rose-200">
                           ✕ FALTA INJUSTIFICADA
                         </span>
@@ -702,12 +775,9 @@ export default function HRDashboard() {
                           {rec.type || 'PRESENCIAL'}
                         </span>
                       )}
-                      {rec.observations && (
-                        <div
-                          className="text-[10px] text-slate-400 mt-1 max-w-[180px] truncate"
-                          title={rec.observations}
-                        >
-                          {rec.observations}
+                      {rec.tareoObservation && (
+                        <div className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 mt-1">
+                          📋 Tareo: {rec.tareoObservation}
                         </div>
                       )}
                     </td>
@@ -873,7 +943,6 @@ export default function HRDashboard() {
                 />
               </div>
 
-              {/* Selector de Alcance de Meses */}
               <div>
                 <label className="text-xs font-bold text-slate-800 block mb-1.5">
                   2. Alcance de Fechas a Procesar
@@ -1023,8 +1092,8 @@ export default function HRDashboard() {
 
       {/* Modal de Corrección Manual de RRHH */}
       {showEditModal && selectedRecord && (
-        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 z-50">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 z-50 overflow-y-auto">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl border border-slate-200 my-6">
             <div className="flex items-start justify-between gap-2">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">
@@ -1035,14 +1104,16 @@ export default function HRDashboard() {
                   {selectedRecord.user.dni}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={handleRellenarJornadaCompleta}
-                className="text-[11px] font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-md border border-indigo-200 transition cursor-pointer whitespace-nowrap"
-                title="Completa las horas vacías con el horario estándar del día"
-              >
-                Rellenar día completo
-              </button>
+              {!editIsHoliday && (
+                <button
+                  type="button"
+                  onClick={handleRellenarJornadaCompleta}
+                  className="text-[11px] font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-md border border-indigo-200 transition cursor-pointer whitespace-nowrap"
+                  title="Completa las horas vacías con el horario estándar del día"
+                >
+                  Rellenar día completo
+                </button>
+              )}
             </div>
 
             <div className="mb-3 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-[11px] text-slate-600">
@@ -1054,12 +1125,13 @@ export default function HRDashboard() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-800 block mb-1">
-                    Hora Ingreso *
+                    Hora Ingreso {!editIsHoliday && '*'}
                   </label>
                   <input
                     type="time"
-                    required
-                    className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none"
+                    required={!editIsHoliday}
+                    disabled={editIsHoliday}
+                    className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none disabled:opacity-50"
                     value={editCheckIn}
                     onChange={(e) => setEditCheckIn(e.target.value)}
                   />
@@ -1067,7 +1139,7 @@ export default function HRDashboard() {
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-xs font-bold text-slate-800">Hora Salida</label>
-                    {editCheckOut && (
+                    {editCheckOut && !editIsHoliday && (
                       <button
                         type="button"
                         onClick={() => setEditCheckOut('')}
@@ -1079,7 +1151,8 @@ export default function HRDashboard() {
                   </div>
                   <input
                     type="time"
-                    className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none"
+                    disabled={editIsHoliday}
+                    className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none disabled:opacity-50"
                     value={editCheckOut}
                     onChange={(e) => setEditCheckOut(e.target.value)}
                   />
@@ -1090,7 +1163,7 @@ export default function HRDashboard() {
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-xs font-bold text-amber-700">Inicio Refrigerio</label>
-                    {editLunchStart && (
+                    {editLunchStart && !editIsHoliday && (
                       <button
                         type="button"
                         onClick={() => setEditLunchStart('')}
@@ -1102,7 +1175,8 @@ export default function HRDashboard() {
                   </div>
                   <input
                     type="time"
-                    className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none"
+                    disabled={editIsHoliday}
+                    className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none disabled:opacity-50"
                     value={editLunchStart}
                     onChange={(e) => setEditLunchStart(e.target.value)}
                   />
@@ -1110,7 +1184,7 @@ export default function HRDashboard() {
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-xs font-bold text-emerald-700">Fin Refrigerio</label>
-                    {editLunchEnd && (
+                    {editLunchEnd && !editIsHoliday && (
                       <button
                         type="button"
                         onClick={() => setEditLunchEnd('')}
@@ -1122,9 +1196,42 @@ export default function HRDashboard() {
                   </div>
                   <input
                     type="time"
-                    className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none"
+                    disabled={editIsHoliday}
+                    className="w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-900 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 font-semibold outline-none disabled:opacity-50"
                     value={editLunchEnd}
                     onChange={(e) => setEditLunchEnd(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {/* Bloque Feriado / Observación Manual SUNAFIL */}
+              <div className="rounded-lg bg-amber-50/80 border border-amber-200 p-3 space-y-2">
+                <label className="flex items-center gap-2 text-xs font-bold text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editIsHoliday}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setEditIsHoliday(checked);
+                      if (checked && !editTareoObs) {
+                        setEditTareoObs('FERIADO NO LABORABLE');
+                      }
+                    }}
+                    className="rounded border-slate-300 text-indigo-600"
+                  />
+                  🎉 Marcar este día como Feriado No Laborable
+                </label>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Observación Oficial para Tareo SUNAFIL (Lunes a Sábado)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ej: Feriado Nacional / Comisión de servicios..."
+                    value={editTareoObs}
+                    onChange={(e) => setEditTareoObs(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-900 bg-white outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
               </div>
@@ -1174,6 +1281,104 @@ export default function HRDashboard() {
                   className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-md transition"
                 >
                   {submitting ? 'Guardando...' : 'Guardar Ajuste'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Rápido de Feriado / Observación Manual SUNAFIL */}
+      {showHolidayModal && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 z-50">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
+            <h2 className="text-lg font-bold text-slate-900">
+              🎉 Registrar Feriado u Observación SUNAFIL
+            </h2>
+            <p className="text-xs text-slate-500 mt-1 mb-4">
+              Aplica feriados calendario u observaciones manuales de Lunes a Sábado. Los días domingo se marcan automáticamente como Descanso Semanal.
+            </p>
+
+            <form onSubmit={handleGuardarFeriadoManual} className="space-y-3">
+              <div>
+                <label className="text-xs font-bold text-slate-800 block mb-1">
+                  Trabajador(es)
+                </label>
+                <select
+                  value={holidayForm.userId}
+                  onChange={(e) => setHolidayForm({ ...holidayForm, userId: e.target.value })}
+                  className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-900 bg-slate-50"
+                >
+                  <option value="ALL">-- Todos los trabajadores activos ({users.length}) --</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name} {u.lastName} ({u.dni})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-800 block mb-1">
+                  Fecha (Lunes a Sábado) *
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={holidayForm.date}
+                  onChange={(e) => setHolidayForm({ ...holidayForm, date: e.target.value })}
+                  className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-900 bg-slate-50"
+                />
+              </div>
+
+              <label className="flex items-center gap-2 text-xs font-bold text-slate-800 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={holidayForm.isHoliday}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setHolidayForm({
+                      ...holidayForm,
+                      isHoliday: checked,
+                      tareoObservation: checked ? 'FERIADO NO LABORABLE' : '',
+                    });
+                  }}
+                  className="rounded border-slate-300 text-indigo-600"
+                />
+                Es Feriado No Laborable (resaltar igual que Descanso Semanal)
+              </label>
+
+              <div>
+                <label className="text-xs font-bold text-slate-800 block mb-1">
+                  Texto en Columna Observaciones (SUNAFIL) *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej: FERIADO NO LABORABLE - DÍA DE TODOS LOS SANTOS"
+                  value={holidayForm.tareoObservation}
+                  onChange={(e) =>
+                    setHolidayForm({ ...holidayForm, tareoObservation: e.target.value })
+                  }
+                  className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-900 bg-slate-50"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={holidaySubmitting}
+                  onClick={() => setShowHolidayModal(false)}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={holidaySubmitting}
+                  className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-bold text-white hover:bg-amber-700 shadow-md transition"
+                >
+                  {holidaySubmitting ? 'Guardando...' : 'Guardar en Tareo'}
                 </button>
               </div>
             </form>

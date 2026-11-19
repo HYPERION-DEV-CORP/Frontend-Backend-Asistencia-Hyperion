@@ -221,7 +221,7 @@ export async function POST(req: NextRequest) {
           lateMinutes,
           latitude,
           longitude,
-          employeeSignature: signature || null,
+          employeeSignature: signature || user.signatureBase64 || null,
         },
       });
 

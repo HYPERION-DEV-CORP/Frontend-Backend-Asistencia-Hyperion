@@ -10,44 +10,51 @@ export async function GET(req: NextRequest) {
     const monthParam = searchParams.get('month');
     const yearParam = searchParams.get('year');
 
-    let dateFilter = {};
     let fileSuffix = `${yearParam || 'Consolidado'}_${monthParam || 'General'}`;
+    let monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    let monthEnd = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0, 23, 59, 59, 999);
 
-    // 1. PRIORIDAD: Filtrar por Período de Planilla seleccionado (PayrollPeriod)
     if (periodId) {
       const selectedPeriod = await prisma.payrollPeriod.findUnique({
         where: { id: periodId },
       });
 
       if (selectedPeriod) {
-        const endOfDay = new Date(selectedPeriod.endDate);
-        endOfDay.setUTCHours(23, 59, 59, 999);
-
-        dateFilter = {
-          date: {
-            gte: selectedPeriod.startDate,
-            lte: endOfDay,
-          },
-        };
-        // Limpiar caracteres especiales para el nombre del archivo Excel
+        monthStart = new Date(selectedPeriod.startDate);
+        monthEnd = new Date(selectedPeriod.endDate);
+        monthEnd.setUTCHours(23, 59, 59, 999);
         fileSuffix = selectedPeriod.name.replace(/[^a-zA-Z0-9_-]/g, '_');
       }
-    } 
-    // 2. RESPALDO: Mantener filtro por mes y año si no se envía periodId
-    else if (monthParam && yearParam) {
+    } else if (monthParam && yearParam) {
       const month = parseInt(monthParam);
       const year = parseInt(yearParam);
-      const startDate = new Date(year, month - 1, 1);
-      const endDate = new Date(year, month, 0, 23, 59, 59);
-      dateFilter = { date: { gte: startDate, lte: endDate } };
+      monthStart = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
+      monthEnd = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    }
+
+    const refYear = monthStart.getUTCFullYear();
+    const refMonth = monthStart.getUTCMonth();
+    const cutoffStart = new Date(Date.UTC(refYear, refMonth - 1, 28, 0, 0, 0));
+    const cutoffEnd = new Date(Date.UTC(refYear, refMonth, 27, 23, 59, 59, 999));
+
+    const queryStart = cutoffStart < monthStart ? cutoffStart : monthStart;
+    const queryEnd = monthEnd > cutoffEnd ? monthEnd : cutoffEnd;
+
+    let totalSundaysInMonth = 0;
+    const dayCursor = new Date(Date.UTC(monthStart.getUTCFullYear(), monthStart.getUTCMonth(), monthStart.getUTCDate()));
+    const dayLimit = new Date(Date.UTC(monthEnd.getUTCFullYear(), monthEnd.getUTCMonth(), monthEnd.getUTCDate()));
+    while (dayCursor <= dayLimit) {
+      if (dayCursor.getUTCDay() === 0) totalSundaysInMonth++;
+      dayCursor.setUTCDate(dayCursor.getUTCDate() + 1);
     }
 
     const users = await prisma.user.findMany({
+      where: { isActive: true },
       include: {
         company: true,
         payrollPolicy: true,
         attendanceRecords: {
-          where: dateFilter,
+          where: { date: { gte: queryStart, lte: queryEnd } },
         },
       },
       orderBy: { name: 'asc' },
@@ -56,23 +63,22 @@ export async function GET(req: NextRequest) {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Pre-Nómina Mensual');
 
-    // 1. Configuración de Columnas Financieras
     worksheet.columns = [
       { header: 'DNI', key: 'dni', width: 12 },
       { header: 'Trabajador', key: 'worker', width: 28 },
       { header: 'Cargo / Puesto', key: 'jobTitle', width: 22 },
-      { header: 'Régimen Laboral', key: 'policy', width: 25 },
       { header: 'Sueldo Base (S/)', key: 'baseSalary', width: 16 },
-      { header: 'Tarifa / Hora (S/)', key: 'hourlyRate', width: 16 },
-      { header: 'Min. Tardanza', key: 'lateMinutes', width: 14 },
+      { header: 'Días Trab.', key: 'workedDays', width: 12 },
+      { header: 'Domingos', key: 'sundaysCount', width: 12 },
+      { header: 'Días Comp.', key: 'computableDays', width: 12 },
+      { header: 'Haber Ganado (S/)', key: 'earnedBaseSalary', width: 18 },
       { header: 'Desc. Tardanza (S/)', key: 'lateDiscount', width: 18 },
-      { header: 'H.E. 25% (S/)', key: 'overtime25Pay', width: 15 },
-      { header: 'H.E. 35% (S/)', key: 'overtime35Pay', width: 15 },
       { header: 'Total H.E. (S/)', key: 'totalOvertimePay', width: 16 },
+      { header: 'Bruto Comp. (S/)', key: 'grossSalary', width: 17 },
+      { header: 'AFP/ONP 13% (S/)', key: 'pensionDiscount', width: 18 },
       { header: 'Neto a Pagar (S/)', key: 'netSalary', width: 18 },
     ];
 
-    // 2. Procesar Cálculos Monetarios
     users.forEach((u) => {
       const policy = u.payrollPolicy;
       const baseSalary = u.baseSalary || 0;
@@ -80,58 +86,95 @@ export async function GET(req: NextRequest) {
       const hoursPerDay = policy?.hoursPerDay || 8.0;
       const factor25 = policy?.overtimeFirst2HoursRate || 1.25;
       const factor35 = policy?.overtimeNextHoursRate || 1.35;
+      const pensionRate = u.pensionRate ?? 13.0;
 
       const dailyRate = baseSalary > 0 ? baseSalary / daysInMonth : 0;
       const hourlyRate = dailyRate > 0 ? dailyRate / hoursPerDay : 0;
       const minuteRate = hourlyRate / 60;
 
+      const monthRecords = u.attendanceRecords.filter((r) => {
+        const d = new Date(r.date);
+        return d >= monthStart && d <= monthEnd;
+      });
+
+      const cutoffRecords = u.attendanceRecords.filter((r) => {
+        const d = new Date(r.date);
+        return d >= cutoffStart && d <= cutoffEnd;
+      });
+
+      let workedDays = 0;
+      if (!u.isSubjectToSupervision) {
+        workedDays = daysInMonth - totalSundaysInMonth;
+      } else {
+        monthRecords.forEach((r) => {
+          if (new Date(r.date).getUTCDay() === 0) return;
+          if (
+            (r.status === 'PRESENT' || r.status === 'LATE' || r.status === 'HOLIDAY') &&
+            (r.checkIn || r.status === 'HOLIDAY')
+          ) {
+            workedDays += 1;
+          }
+        });
+      }
+
       let totalLateMinutes = 0;
       let totalOvertime25Minutes = 0;
       let totalOvertime35Minutes = 0;
 
-      u.attendanceRecords.forEach((r) => {
+      cutoffRecords.forEach((r) => {
+        if (r.status === 'ABSENT') return;
         totalLateMinutes += r.lateMinutes || 0;
-        if (r.isOvertimeApproved || r.isModifiedByHR || (r.overtimeMinutes && r.overtimeMinutes > 0)) {
+        if (r.isOvertimeApproved && r.overtimeMinutes && r.overtimeMinutes > 0) {
           totalOvertime25Minutes += r.overtime25Minutes || 0;
           totalOvertime35Minutes += r.overtime35Minutes || 0;
         }
       });
 
-      const lateDiscount = Math.round((totalLateMinutes * minuteRate) * 100) / 100;
-      const overtime25Pay = Math.round((totalOvertime25Minutes * (minuteRate * factor25)) * 100) / 100;
-      const overtime35Pay = Math.round((totalOvertime35Minutes * (minuteRate * factor35)) * 100) / 100;
+      const computableDays = Math.min(daysInMonth, workedDays + totalSundaysInMonth);
+      const earnedBaseSalary = Math.round(computableDays * dailyRate * 100) / 100;
+      const lateDiscount = Math.round(totalLateMinutes * minuteRate * 100) / 100;
+      const overtime25Pay = Math.round(totalOvertime25Minutes * (minuteRate * factor25) * 100) / 100;
+      const overtime35Pay = Math.round(totalOvertime35Minutes * (minuteRate * factor35) * 100) / 100;
       const totalOvertimePay = Math.round((overtime25Pay + overtime35Pay) * 100) / 100;
-      const netSalary = Math.round((baseSalary + totalOvertimePay - lateDiscount) * 100) / 100;
+      const grossSalary = Math.max(
+        0,
+        Math.round((earnedBaseSalary + totalOvertimePay - lateDiscount) * 100) / 100
+      );
+      const pensionDiscount = Math.round(grossSalary * (pensionRate / 100) * 100) / 100;
+      const netSalary = Math.max(0, Math.round((grossSalary - pensionDiscount) * 100) / 100);
 
       const row = worksheet.addRow({
         dni: u.dni,
         worker: `${u.name} ${u.lastName}`,
         jobTitle: u.jobTitle,
-        policy: policy?.name || 'Estándar General 728',
         baseSalary,
-        hourlyRate: Number(hourlyRate.toFixed(2)),
-        lateMinutes: totalLateMinutes,
+        workedDays,
+        sundaysCount: totalSundaysInMonth,
+        computableDays,
+        earnedBaseSalary,
         lateDiscount,
-        overtime25Pay,
-        overtime35Pay,
         totalOvertimePay,
+        grossSalary,
+        pensionDiscount,
         netSalary,
       });
 
-      // Formato numérico de moneda peruana (S/)
-      row.getCell('baseSalary').numFmt = '"S/"#,##0.00';
-      row.getCell('hourlyRate').numFmt = '"S/"#,##0.00';
-      row.getCell('lateDiscount').numFmt = '"S/"#,##0.00';
-      row.getCell('overtime25Pay').numFmt = '"S/"#,##0.00';
-      row.getCell('overtime35Pay').numFmt = '"S/"#,##0.00';
-      row.getCell('totalOvertimePay').numFmt = '"S/"#,##0.00';
-      row.getCell('netSalary').numFmt = '"S/"#,##0.00';
+      [
+        'baseSalary',
+        'earnedBaseSalary',
+        'lateDiscount',
+        'totalOvertimePay',
+        'grossSalary',
+        'pensionDiscount',
+        'netSalary',
+      ].forEach((col) => {
+        row.getCell(col).numFmt = '"S/"#,##0.00';
+      });
     });
 
-    // 3. AutoFiltro y Estilos Corporativos
     worksheet.autoFilter = {
       from: { row: 1, column: 1 },
-      to: { row: users.length + 1, column: 12 },
+      to: { row: users.length + 1, column: 13 },
     };
 
     const headerRow = worksheet.getRow(1);

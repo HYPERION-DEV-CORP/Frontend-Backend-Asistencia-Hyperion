@@ -97,23 +97,25 @@ model Company {
 }
 
 model User {
-  id               String   @id @default(uuid())
-  dni              String   @unique
-  docType          String   @default("DNI")
-  biometricCode    String?  @unique // Código EnNo del reloj biométrico (Ej: "00000004")
-  name             String
-  lastName         String
-  email            String   @unique
-  passwordHash     String
-  role             Role     @default(EMPLOYEE)
+  id                     String   @id @default(uuid())
+  dni                    String   @unique
+  docType                String   @default("DNI")
+  biometricCode          String?  @unique // Código EnNo del reloj biométrico (Ej: "00000004")
+  name                   String
+  lastName               String
+  email                  String   @unique
+  passwordHash           String
+  role                   Role     @default(EMPLOYEE)
   isSubjectToSupervision Boolean  @default(true) // true: Marca asistencia y genera faltas | false: Personal de dirección exonerado
-  jobTitle         String
-  isActive         Boolean  @default(true)
-  workStartTime    String   @default("09:00")
-  toleranceMinutes Int      @default(10)
-  homeOfficeQuota  Int      @default(4)
-  baseSalary       Float    @default(0.0)
-  discountRate     Float    @default(0.0)
+  jobTitle               String
+  isActive               Boolean  @default(true)
+  workStartTime          String   @default("09:00")
+  toleranceMinutes       Int      @default(10)
+  homeOfficeQuota        Int      @default(4)
+  baseSalary             Float    @default(0.0)
+  discountRate           Float    @default(0.0)
+  pensionSystem          String   @default("AFP") // "AFP" | "ONP" | "NONE"
+  pensionRate            Float    @default(13.0)  // Porcentaje previsional (13% por defecto)
 
   companyId String
   company   Company @relation(fields: [companyId], references: [id])
@@ -121,13 +123,18 @@ model User {
   payrollPolicyId String?
   payrollPolicy   PayrollPolicy? @relation(fields: [payrollPolicyId], references: [id])
 
+  signatureBase64     String?   @db.Text // Firma configurada en el perfil de la app móvil (marcación diaria)
+  resetToken          String?   @unique  // Token/código OTP para recuperar contraseña
+  resetTokenExpiresAt DateTime?          // Expiración del código (ej. 15 minutos)
+
   homeAddresses       HomeAddress[]
   attendanceRecords   AttendanceRecord[]
   auditLogs           AuditLog[]
   permissionsRequest  PermissionRequest[]
   digitalPaystubs     DigitalPaystub[]
-  closedPeriods       PayrollPeriod[]      @relation("ClosedPeriods")
-  rectificationAudits AttendanceAuditLog[] @relation("AdminRectifications")
+  closedPeriods       PayrollPeriod[]            @relation("ClosedPeriods")
+  rectificationAudits AttendanceAuditLog[]       @relation("AdminRectifications")
+  monthlySignOffs     MonthlyAttendanceSignOff[] // <--- RELACIÓN INVERSA AGREGADA
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -174,8 +181,9 @@ model AttendanceRecord {
 
   latitude             Float            @default(-14.078775)
   longitude            Float            @default(-75.751176)
-  employeeSignature    String?
+  employeeSignature    String?          @db.Text // <--- @db.Text PARA FIRMA BASE64
   observations         String?
+  tareoObservation     String?                   // <--- OBSERVACIÓN MANUAL PARA TAREO SUNAFIL
 
   auditHistory         AttendanceAuditLog[]
 
@@ -297,4 +305,18 @@ model PayrollPolicy {
 
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
+}
+
+model MonthlyAttendanceSignOff {
+  id                   String    @id @default(uuid())
+  userId               String
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  year                 Int
+  month                Int
+  closingSignature     String?   @db.Text // Firma NUEVA dibujada a fin de mes (distinta a signatureBase64)
+  signedAt             DateTime?
+  hrSignature          String?   @db.Text // Firma de RRHH
+  isLocked             Boolean   @default(false)
+
+  @@unique([userId, year, month])
 }
