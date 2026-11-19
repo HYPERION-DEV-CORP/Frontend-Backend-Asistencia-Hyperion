@@ -6,7 +6,6 @@ export async function GET() {
   try {
     const db = prisma as any;
 
-    // Busca automáticamente el modelo de boletas según cómo esté nombrado en schema.prisma
     const paystubDelegate =
       db.paystub || db.digitalPaystub || db.payrollRecord || db.payStub;
 
@@ -34,7 +33,7 @@ export async function GET() {
               name: true,
               lastName: true,
               dni: true,
-              position: true,
+              role: true,
             },
           },
         },
