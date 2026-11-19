@@ -37,7 +37,7 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith('/api/v1/auth/') ||
     pathname.startsWith('/api/v1/attendance') ||
     pathname.startsWith('/api/v1/home-addresses') ||
-    pathname.startsWith('/api/v1/user/') ||
+    pathname.startsWith('/api/v1/users/') ||
     pathname.startsWith('/api/v1/reports/attendance-sheet') ||
     (pathname === '/api/v1/hr/permissions' && method === 'POST');
 
