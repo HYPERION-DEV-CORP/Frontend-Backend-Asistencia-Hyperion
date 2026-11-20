@@ -62,6 +62,19 @@ interface UnmappedBioUser {
   count: number;
 }
 
+interface BiometricSyncJob {
+  id: string;
+  filterType: string;
+  startMonth: string | null;
+  endMonth: string | null;
+  status: 'PENDING' | 'COMPLETED' | 'ERROR';
+  recordsSent: number;
+  processedNew: number;
+  errorMessage: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
 const getCurrentPeruMonth = () => {
   const nowPeru = new Date(Date.now() - 5 * 60 * 60 * 1000);
   return nowPeru.toISOString().slice(0, 7); // "YYYY-MM"
@@ -106,16 +119,19 @@ export default function HRDashboard() {
   });
   const [holidaySubmitting, setHolidaySubmitting] = useState(false);
 
-  // Estados para Importación Biométrica (ALOG_001.txt)
+  // Estados para Sincronización / Importación Biométrica
   const [showBioModal, setShowBioModal] = useState(false);
+  const [bioMode, setBioMode] = useState<'DIRECT_SYNC' | 'FILE_UPLOAD'>('DIRECT_SYNC');
   const [bioFile, setBioFile] = useState<File | null>(null);
-  const [bioFilterType, setBioFilterType] = useState<'ALL' | 'SINGLE_MONTH' | 'RANGE'>('ALL');
+  const [bioFilterType, setBioFilterType] = useState<'ALL' | 'SINGLE_MONTH' | 'RANGE'>('SINGLE_MONTH');
   const [bioStartMonth, setBioStartMonth] = useState<string>(getCurrentPeruMonth);
   const [bioEndMonth, setBioEndMonth] = useState<string>(getCurrentPeruMonth);
   const [bioUploading, setBioUploading] = useState(false);
   const [unmappedBioUsers, setUnmappedBioUsers] = useState<UnmappedBioUser[]>([]);
   const [bioMapping, setBioMapping] = useState<Record<string, string>>({});
   const [bioSummary, setBioSummary] = useState<string | null>(null);
+  const [syncJobs, setSyncJobs] = useState<BiometricSyncJob[]>([]);
+  const [syncRequesting, setSyncRequesting] = useState(false);
 
   // Estado para Auditoría Manual de Faltas
   const [auditingAbsences, setAuditingAbsences] = useState(false);
@@ -174,6 +190,39 @@ export default function HRDashboard() {
     loadData(false);
   }, []);
 
+  const loadSyncJobs = async () => {
+    try {
+      const res = await fetch('/api/v1/biometric/sync-jobs');
+      if (res.ok) {
+        const data = await res.json();
+        const jobsList: BiometricSyncJob[] = data.recentJobs || [];
+        setSyncJobs((prev) => {
+          const prevLatest = prev[0];
+          const newLatest = jobsList[0];
+          if (
+            newLatest &&
+            newLatest.status === 'COMPLETED' &&
+            (!prevLatest ||
+              prevLatest.id !== newLatest.id ||
+              prevLatest.status !== 'COMPLETED')
+          ) {
+            loadData(false);
+          }
+          return jobsList;
+        });
+      }
+    } catch {
+      // Silencioso durante polling
+    }
+  };
+
+  useEffect(() => {
+    if (!showBioModal) return;
+    loadSyncJobs();
+    const interval = setInterval(loadSyncJobs, 1500);
+    return () => clearInterval(interval);
+  }, [showBioModal]);
+
   const checkIsPeriodClosed = (dateStr: string) => {
     if (!dateStr || periods.length === 0) return false;
     const target = new Date(dateStr.includes('T') ? dateStr : `${dateStr}T00:00:00`);
@@ -193,6 +242,42 @@ export default function HRDashboard() {
       filterMode === 'ALL' || (r.overtimeMinutes > 0 && !r.isOvertimeApproved);
     return matchesUser && matchesMonth && matchesOt;
   });
+
+  // Solicitar extracción directa al agente biométrico sin abrir AttendanceTracker
+  const handleDirectBiometricSync = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (bioFilterType === 'RANGE' && bioStartMonth && bioEndMonth && bioStartMonth > bioEndMonth) {
+      alert('El mes de inicio no puede ser posterior al mes de fin.');
+      return;
+    }
+
+    setSyncRequesting(true);
+    try {
+      const storedUser = localStorage.getItem('user');
+      const adminId = storedUser ? JSON.parse(storedUser).id : '';
+
+      const res = await fetch('/api/v1/biometric/sync-jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filterType: bioFilterType,
+          startMonth: bioFilterType !== 'ALL' ? bioStartMonth : null,
+          endMonth: bioFilterType === 'RANGE' ? bioEndMonth : null,
+          adminId,
+        }),
+      });
+
+      if (res.ok) {
+        await loadSyncJobs();
+      } else {
+        alert('No se pudo encolar la sincronización biométrica.');
+      }
+    } catch {
+      alert('Error de conexión con el servidor.');
+    } finally {
+      setSyncRequesting(false);
+    }
+  };
 
   // Procesar subida del archivo biométrico ALOG_001.txt
   const handleBiometricUpload = async (e: React.FormEvent) => {
@@ -492,6 +577,10 @@ export default function HRDashboard() {
     (r) => r.overtimeMinutes > 0 && !r.isOvertimeApproved
   ).length;
 
+  const pendingBioJob = syncJobs.find((j) => j.status === 'PENDING');
+  const lastCompletedBioJob = syncJobs.find((j) => j.status === 'COMPLETED');
+  const lastErrorBioJob = syncJobs[0]?.status === 'ERROR' ? syncJobs[0] : null;
+
   return (
     <div className="min-h-screen bg-slate-50 p-8">
       {/* Encabezado Corporativo Oficial SUNAFIL */}
@@ -510,6 +599,7 @@ export default function HRDashboard() {
           {enabledModules.includes('BIOMETRIC_SYNC') && (
             <button
               onClick={() => {
+                setBioMode('DIRECT_SYNC');
                 setBioFile(null);
                 setBioSummary(null);
                 setUnmappedBioUsers([]);
@@ -517,7 +607,7 @@ export default function HRDashboard() {
               }}
               className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-indigo-700 transition text-sm cursor-pointer"
             >
-              🧬 Importar Biométrico (.txt)
+              🧬 Sincronizar Biométrico
             </button>
           )}
 
@@ -917,93 +1007,127 @@ export default function HRDashboard() {
         </table>
       </div>
 
-      {/* Modal de Importación Biométrica ALOG_001.txt */}
+      {/* Modal de Sincronización / Importación Biométrica */}
       {showBioModal && (
         <div className="fixed inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 z-50">
           <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
             <h2 className="text-lg font-bold text-slate-900">
-              🧬 Importar Marcaciones del Reloj Biométrico
+              🧬 Sincronización del Reloj Biométrico
             </h2>
             <p className="text-xs text-slate-500 mt-1 mb-4">
-              Sube el archivo exportado por el dispositivo (<code>ALOG_001.txt</code>). Las
-              marcaciones se fusionan sin duplicados con las de la app móvil.
+              Extrae las marcaciones directamente desde el reloj biométrico en red o sube un archivo manual de respaldo.
             </p>
 
-            <form onSubmit={handleBiometricUpload} className="space-y-4">
-              <div>
-                <label className="text-xs font-bold text-slate-800 block mb-1.5">
-                  1. Seleccionar Archivo Biométrico (.txt)
-                </label>
-                <input
-                  type="file"
-                  accept=".txt,.csv"
-                  required
-                  onChange={(e) => setBioFile(e.target.files?.[0] || null)}
-                  className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-700 bg-slate-50"
-                />
-              </div>
+            {/* Selector de Modo */}
+            <div className="grid grid-cols-2 gap-2 mb-4 bg-slate-100 p-1 rounded-xl border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setBioMode('DIRECT_SYNC')}
+                className={`py-2 px-3 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  bioMode === 'DIRECT_SYNC'
+                    ? 'bg-white text-indigo-700 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                ⚡ Directo desde Reloj
+              </button>
+              <button
+                type="button"
+                onClick={() => setBioMode('FILE_UPLOAD')}
+                className={`py-2 px-3 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  bioMode === 'FILE_UPLOAD'
+                    ? 'bg-white text-indigo-700 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                📄 Subir Archivo (.txt / .csv)
+              </button>
+            </div>
 
-              <div>
-                <label className="text-xs font-bold text-slate-800 block mb-1.5">
-                  2. Alcance de Fechas a Procesar
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setBioFilterType('ALL')}
-                    className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
-                      bioFilterType === 'ALL'
-                        ? 'bg-indigo-600 text-white border-indigo-600'
-                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
-                    }`}
-                  >
-                    Todo el archivo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setBioFilterType('SINGLE_MONTH')}
-                    className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
-                      bioFilterType === 'SINGLE_MONTH'
-                        ? 'bg-indigo-600 text-white border-indigo-600'
-                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
-                    }`}
-                  >
-                    Un mes específico
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setBioFilterType('RANGE')}
-                    className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
-                      bioFilterType === 'RANGE'
-                        ? 'bg-indigo-600 text-white border-indigo-600'
-                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
-                    }`}
-                  >
-                    Rango de meses
-                  </button>
+            {bioMode === 'DIRECT_SYNC' ? (
+              <form onSubmit={handleDirectBiometricSync} className="space-y-4">
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-700">Estado del Servicio Biométrico:</span>
+                    <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                      En línea (Tiempo real)
+                    </span>
+                  </div>
+                  {pendingBioJob ? (
+                    <p className="text-amber-700 font-semibold">
+                      ⏳ Extracción en proceso (
+                      {pendingBioJob.filterType === 'ALL'
+                        ? 'Todo el historial'
+                        : pendingBioJob.filterType === 'RANGE'
+                        ? `${pendingBioJob.startMonth} a ${pendingBioJob.endMonth}`
+                        : pendingBioJob.startMonth}
+                      )... Se actualizará en segundos.
+                    </p>
+                  ) : lastErrorBioJob ? (
+                    <p className="text-rose-600 font-semibold">
+                      ⚠️ Último intento con observación: {lastErrorBioJob.errorMessage}
+                    </p>
+                  ) : lastCompletedBioJob ? (
+                    <p className="text-slate-600">
+                      ✅ Última extracción:{' '}
+                      {lastCompletedBioJob.completedAt
+                        ? new Date(lastCompletedBioJob.completedAt).toLocaleString('es-PE')
+                        : 'Reciente'}{' '}
+                      ({lastCompletedBioJob.processedNew} nuevos registros procesados).
+                    </p>
+                  ) : (
+                    <p className="text-slate-500">
+                      Las marcaciones diarias se sincronizan automáticamente. Usa este panel si deseas extraer un mes pasado específico.
+                    </p>
+                  )}
                 </div>
-              </div>
 
-              {bioFilterType === 'SINGLE_MONTH' && (
                 <div>
-                  <label className="text-xs font-bold text-slate-700 block mb-1">
-                    Mes a Importar
+                  <label className="text-xs font-bold text-slate-800 block mb-1.5">
+                    Alcance de Fechas a Extraer del Reloj
                   </label>
-                  <input
-                    type="month"
-                    required
-                    value={bioStartMonth}
-                    onChange={(e) => setBioStartMonth(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
-                  />
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setBioFilterType('SINGLE_MONTH')}
+                      className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                        bioFilterType === 'SINGLE_MONTH'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      Un mes específico
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBioFilterType('RANGE')}
+                      className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                        bioFilterType === 'RANGE'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      Rango de meses
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBioFilterType('ALL')}
+                      className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                        bioFilterType === 'ALL'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      Todo el historial
+                    </button>
+                  </div>
                 </div>
-              )}
 
-              {bioFilterType === 'RANGE' && (
-                <div className="grid grid-cols-2 gap-3">
+                {bioFilterType === 'SINGLE_MONTH' && (
                   <div>
                     <label className="text-xs font-bold text-slate-700 block mb-1">
-                      Desde el Mes (Inicio)
+                      Mes a Extraer
                     </label>
                     <input
                       type="month"
@@ -1013,79 +1137,213 @@ export default function HRDashboard() {
                       className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
                     />
                   </div>
+                )}
+
+                {bioFilterType === 'RANGE' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        Desde el Mes (Inicio)
+                      </label>
+                      <input
+                        type="month"
+                        required
+                        value={bioStartMonth}
+                        onChange={(e) => setBioStartMonth(e.target.value)}
+                        className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        Hasta el Mes (Fin)
+                      </label>
+                      <input
+                        type="month"
+                        required
+                        value={bioEndMonth}
+                        onChange={(e) => setBioEndMonth(e.target.value)}
+                        className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setShowBioModal(false)}
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+                  >
+                    Cerrar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={syncRequesting || Boolean(pendingBioJob)}
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-md transition disabled:opacity-50 cursor-pointer"
+                  >
+                    {pendingBioJob ? 'Extrayendo del reloj...' : 'Extraer y Registrar Ahora'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleBiometricUpload} className="space-y-4">
+                <div>
+                  <label className="text-xs font-bold text-slate-800 block mb-1.5">
+                    1. Seleccionar Archivo Biométrico (.txt)
+                  </label>
+                  <input
+                    type="file"
+                    accept=".txt,.csv"
+                    required
+                    onChange={(e) => setBioFile(e.target.files?.[0] || null)}
+                    className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-700 bg-slate-50"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-800 block mb-1.5">
+                    2. Alcance de Fechas a Procesar
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setBioFilterType('ALL')}
+                      className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                        bioFilterType === 'ALL'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      Todo el archivo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBioFilterType('SINGLE_MONTH')}
+                      className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                        bioFilterType === 'SINGLE_MONTH'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      Un mes específico
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBioFilterType('RANGE')}
+                      className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                        bioFilterType === 'RANGE'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      Rango de meses
+                    </button>
+                  </div>
+                </div>
+
+                {bioFilterType === 'SINGLE_MONTH' && (
                   <div>
                     <label className="text-xs font-bold text-slate-700 block mb-1">
-                      Hasta el Mes (Fin)
+                      Mes a Importar
                     </label>
                     <input
                       type="month"
                       required
-                      value={bioEndMonth}
-                      onChange={(e) => setBioEndMonth(e.target.value)}
+                      value={bioStartMonth}
+                      onChange={(e) => setBioStartMonth(e.target.value)}
                       className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
                     />
                   </div>
-                </div>
-              )}
+                )}
 
-              {bioSummary && (
-                <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-800 font-medium">
-                  ✅ {bioSummary}
-                </div>
-              )}
-
-              {unmappedBioUsers.length > 0 && (
-                <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-2.5">
-                  <p className="text-xs font-bold text-amber-900">
-                    ⚠️ Códigos del reloj sin trabajador asignado ({unmappedBioUsers.length}):
-                  </p>
-                  <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                    {unmappedBioUsers.map((u) => (
-                      <div
-                        key={u.enNo}
-                        className="flex items-center justify-between gap-2 bg-white p-2 rounded border border-amber-200 text-xs"
-                      >
-                        <div>
-                          <span className="font-mono font-bold text-slate-800">#{u.enNo}</span>{' '}
-                          <span className="text-slate-600">({u.deviceName})</span>
-                        </div>
-                        <select
-                          value={bioMapping[u.enNo] || ''}
-                          onChange={(e) =>
-                            setBioMapping({ ...bioMapping, [u.enNo]: e.target.value })
-                          }
-                          className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-800"
-                        >
-                          <option value="">-- Ignorar --</option>
-                          {users.map((usr) => (
-                            <option key={usr.id} value={usr.id}>
-                              {usr.name} {usr.lastName} ({usr.dni})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    ))}
+                {bioFilterType === 'RANGE' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        Desde el Mes (Inicio)
+                      </label>
+                      <input
+                        type="month"
+                        required
+                        value={bioStartMonth}
+                        onChange={(e) => setBioStartMonth(e.target.value)}
+                        className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        Hasta el Mes (Fin)
+                      </label>
+                      <input
+                        type="month"
+                        required
+                        value={bioEndMonth}
+                        onChange={(e) => setBioEndMonth(e.target.value)}
+                        className="w-full rounded-lg border border-slate-300 p-2 text-xs text-slate-800 bg-slate-50"
+                      />
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowBioModal(false)}
-                  className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-                >
-                  Cerrar
-                </button>
-                <button
-                  type="submit"
-                  disabled={bioUploading || !bioFile}
-                  className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-md transition disabled:opacity-50"
-                >
-                  {bioUploading ? 'Procesando...' : 'Procesar Archivo'}
-                </button>
-              </div>
-            </form>
+                {bioSummary && (
+                  <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-800 font-medium">
+                    ✅ {bioSummary}
+                  </div>
+                )}
+
+                {unmappedBioUsers.length > 0 && (
+                  <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-2.5">
+                    <p className="text-xs font-bold text-amber-900">
+                      ⚠️ Códigos del reloj sin trabajador asignado ({unmappedBioUsers.length}):
+                    </p>
+                    <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                      {unmappedBioUsers.map((u) => (
+                        <div
+                          key={u.enNo}
+                          className="flex items-center justify-between gap-2 bg-white p-2 rounded border border-amber-200 text-xs"
+                        >
+                          <div>
+                            <span className="font-mono font-bold text-slate-800">#{u.enNo}</span>{' '}
+                            <span className="text-slate-600">({u.deviceName})</span>
+                          </div>
+                          <select
+                            value={bioMapping[u.enNo] || ''}
+                            onChange={(e) =>
+                              setBioMapping({ ...bioMapping, [u.enNo]: e.target.value })
+                            }
+                            className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-800"
+                          >
+                            <option value="">-- Ignorar --</option>
+                            {users.map((usr) => (
+                              <option key={usr.id} value={usr.id}>
+                                {usr.name} {usr.lastName} ({usr.dni})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setShowBioModal(false)}
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                  >
+                    Cerrar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={bioUploading || !bioFile}
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-md transition disabled:opacity-50"
+                  >
+                    {bioUploading ? 'Procesando...' : 'Procesar Archivo'}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

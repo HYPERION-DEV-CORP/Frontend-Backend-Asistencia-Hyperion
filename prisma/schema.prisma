@@ -320,3 +320,17 @@ model MonthlyAttendanceSignOff {
 
   @@unique([userId, year, month])
 }
+
+model BiometricSyncJob {
+  id           String   @id @default(cuid())
+  type         String   @default("AUTO") // "AUTO" o "MANUAL_MONTH"
+  month        Int?
+  year         Int?
+  status       String   @default("PENDING") // "PENDING", "COMPLETED", "ERROR"
+  recordsSent  Int      @default(0)
+  processedNew Int      @default(0)
+  errorMessage String?
+  requestedBy  String?
+  createdAt    DateTime @default(now())
+  completedAt  DateTime?
+}
