@@ -144,8 +144,8 @@ export async function POST(req: NextRequest) {
 
       const [workHour, workMin] = user.workStartTime.split(':').map(Number);
 
-      // A) Primera marcación del día -> CHECK_IN
-      if (!record) {
+      // A) Primera marcación del día (o reemplazo de falta injustificada previa) -> CHECK_IN
+      if (!record || record.status === 'ABSENT' || !record.checkIn) {
         const graceLimitTime = new Date(p.punchTime);
         graceLimitTime.setHours(workHour, workMin + user.toleranceMinutes, 0, 0);
 
@@ -163,28 +163,38 @@ export async function POST(req: NextRequest) {
           );
         }
 
-        const newRec = {
-          userId: user.id,
-          date: p.dayDate,
-          checkIn: p.punchTime,
-          lunchStart: null as Date | null,
-          lunchEnd: null as Date | null,
-          checkOut: null as Date | null,
-          type: 'BIOMETRIC_FINGERPRINT',
-          status,
-          lateMinutes,
-          overtimeMinutes: 0,
-          overtime25Minutes: 0,
-          overtime35Minutes: 0,
-          latitude: company.officeLat,
-          longitude: company.officeLng,
-          employeeSignature: user.signatureBase64 || null,
-          observations: `Sincronizado desde Biométrico (${p.serialNo})`,
-          _isNew: true,
-        };
+        if (record && record.id) {
+          // Actualizar el registro ABSENT existente convirtiéndolo en marcación válida
+          record.checkIn = p.punchTime;
+          record.type = 'BIOMETRIC_FINGERPRINT';
+          record.status = status;
+          record.lateMinutes = lateMinutes;
+          record.observations = `Sincronizado desde Biométrico (${p.serialNo})`;
+          toUpdate.set(record.id, record);
+        } else {
+          const newRec = {
+            userId: user.id,
+            date: p.dayDate,
+            checkIn: p.punchTime,
+            lunchStart: null as Date | null,
+            lunchEnd: null as Date | null,
+            checkOut: null as Date | null,
+            type: 'BIOMETRIC_FINGERPRINT',
+            status,
+            lateMinutes,
+            overtimeMinutes: 0,
+            overtime25Minutes: 0,
+            overtime35Minutes: 0,
+            latitude: company.officeLat,
+            longitude: company.officeLng,
+            employeeSignature: user.signatureBase64 || null,
+            observations: `Sincronizado desde Biométrico (${p.serialNo})`,
+            _isNew: true,
+          };
+          recordMap.set(mapKey, newRec);
+          toCreate.push(newRec);
+        }
 
-        recordMap.set(mapKey, newRec);
-        toCreate.push(newRec);
         processed++;
         continue;
       }
