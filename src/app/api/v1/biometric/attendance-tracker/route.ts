@@ -55,9 +55,9 @@ export async function POST(req: NextRequest) {
       );
       if (isNaN(punchTime.getTime())) continue;
 
-      const dayDate = new Date(punchTime);
-      dayDate.setHours(0, 0, 0, 0);
-      const dayKey = dayDate.toISOString().slice(0, 10);
+      const dayDate = new Date(`${punchStr.slice(0, 10)}T00:00:00.000Z`);
+      const dayKey = punchStr.slice(0, 10);
+
 
       dniSet.add(empCode);
       if (!minDate || dayDate < minDate) minDate = dayDate;
@@ -270,9 +270,14 @@ export async function POST(req: NextRequest) {
           prisma.attendanceRecord.update({
             where: { id: rec.id },
             data: {
+              checkIn: rec.checkIn,
               checkOut: rec.checkOut,
               lunchStart: rec.lunchStart,
               lunchEnd: rec.lunchEnd,
+              type: rec.type,
+              status: rec.status,
+              lateMinutes: rec.lateMinutes,
+              observations: rec.observations,
               overtimeMinutes: rec.overtimeMinutes,
               overtime25Minutes: rec.overtime25Minutes,
               overtime35Minutes: rec.overtime35Minutes,
