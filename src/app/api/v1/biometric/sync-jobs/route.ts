@@ -36,12 +36,50 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const pendingJob = await prisma.biometricSyncJob.findFirst({
-      where: { status: 'PENDING' },
-      orderBy: { createdAt: 'asc' },
-    });
+    const [pendingJob, usersWithCode, company] = await Promise.all([
+      prisma.biometricSyncJob.findFirst({
+        where: { status: 'PENDING' },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.user.findMany({
+        where: {
+          isActive: true,
+          biometricCode: { not: null },
+        },
+        select: {
+          biometricCode: true,
+          dni: true,
+        },
+      }),
+      prisma.company.findFirst({
+        select: {
+          subscriptionStatus: true,
+          enabledModules: true,
+        },
+      }),
+    ]);
 
-    return NextResponse.json({ pendingJob: formatJobForClient(pendingJob) });
+    // Construir diccionario dinámico biometricCode (DIN) -> DNI
+    const dinMap: Record<string, string> = {};
+    for (const u of usersWithCode) {
+      if (u.biometricCode && u.dni) {
+        const rawCode = String(u.biometricCode).trim();
+        const noLeadingZeros = rawCode.replace(/^0+/, '') || rawCode;
+        dinMap[rawCode] = u.dni;
+        dinMap[noLeadingZeros] = u.dni;
+      }
+    }
+
+    // Validar estado de suscripción y módulo biométrico de la empresa
+    const subscriptionActive = company ? company.subscriptionStatus === 'ACTIVE' : true;
+    const syncEnabled = company ? company.enabledModules.includes('BIOMETRIC_SYNC') : true;
+
+    return NextResponse.json({
+      pendingJob: formatJobForClient(pendingJob),
+      dinMap,
+      subscriptionActive,
+      syncEnabled,
+    });
   }
 
   const recentJobs = await prisma.biometricSyncJob.findMany({

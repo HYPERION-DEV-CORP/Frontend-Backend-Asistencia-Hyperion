@@ -1,6 +1,7 @@
 // src/app/api/v1/biometric/attendance-tracker/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { AttendanceType } from '@prisma/client';
 
 const API_KEY = process.env.BIOMETRIC_API_KEY || 'HYPERION_BIOMETRIC_KEY_2026';
 
@@ -32,16 +33,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ status: 'success', processed: 0, errors: [] });
     }
 
-    // 1. Parsear fechas y ordenar cronológicamente en memoria
+    // 1. Parsear fechas, método real (RFID -> PRESENTIAL_NFC / Huella -> BIOMETRIC_FINGERPRINT)
     const parsedPunches: {
       empCode: string;
       serialNo: string;
+      method: AttendanceType;
       punchTime: Date;
       dayKey: string;
       dayDate: Date;
     }[] = [];
     const errorsSet = new Set<string>();
-    const dniSet = new Set<string>();
+    const codeCandidates = new Set<string>();
     let minDate: Date | null = null;
     let maxDate: Date | null = null;
 
@@ -58,14 +60,25 @@ export async function POST(req: NextRequest) {
       const dayDate = new Date(`${punchStr.slice(0, 10)}T00:00:00.000Z`);
       const dayKey = punchStr.slice(0, 10);
 
+      // Mapeo al enum AttendanceType existente en Prisma
+      const method: AttendanceType =
+        item.VerificationMethod === 'BIOMETRIC_RFID'
+          ? 'PRESENTIAL_NFC'
+          : 'BIOMETRIC_FINGERPRINT';
 
-      dniSet.add(empCode);
+      // Candidatos de búsqueda: código exacto y versión con padding de 8 dígitos
+      codeCandidates.add(empCode);
+      if (empCode.length < 8) {
+        codeCandidates.add(empCode.padStart(8, '0'));
+      }
+
       if (!minDate || dayDate < minDate) minDate = dayDate;
       if (!maxDate || dayDate > maxDate) maxDate = dayDate;
 
       parsedPunches.push({
         empCode,
         serialNo: String(item.SerialNo || 'Reloj'),
+        method,
         punchTime,
         dayKey,
         dayDate,
@@ -74,12 +87,27 @@ export async function POST(req: NextRequest) {
 
     parsedPunches.sort((a, b) => a.punchTime.getTime() - b.punchTime.getTime());
 
-    // 2. Precarga masiva en 3 consultas SQL (sin consultas N+1 dentro del bucle)
+    // 2. Buscar usuarios por DNI o por biometricCode (EnNo)
+    const candidatesArr = Array.from(codeCandidates);
     const users = await prisma.user.findMany({
-      where: { dni: { in: Array.from(dniSet) } },
+      where: {
+        OR: [
+          { dni: { in: candidatesArr } },
+          { biometricCode: { in: candidatesArr } },
+        ],
+      },
       include: { company: true, payrollPolicy: true },
     });
-    const userByDni = new Map(users.map((u) => [u.dni, u]));
+
+    // Indexar usuarios tanto por dni como por biometricCode (con y sin ceros a la izquierda)
+    const userByCode = new Map<string, (typeof users)[0]>();
+    for (const u of users) {
+      userByCode.set(u.dni, u);
+      if (u.biometricCode) {
+        userByCode.set(u.biometricCode, u);
+        userByCode.set(u.biometricCode.replace(/^0+/, ''), u);
+      }
+    }
 
     const closedPeriods = await prisma.payrollPeriod.findMany({
       where: { status: 'CLOSED' },
@@ -103,13 +131,24 @@ export async function POST(req: NextRequest) {
 
     const toCreate: any[] = [];
     const toUpdate = new Map<string, any>();
+    const unmatchedToSave: any[] = [];
     let processed = 0;
 
-    // 3. Procesar todas las marcaciones en memoria
+    // 3. Procesar marcaciones
     for (const p of parsedPunches) {
-      const user = userByDni.get(p.empCode);
+      const user =
+        userByCode.get(p.empCode) ||
+        userByCode.get(p.empCode.padStart(8, '0')) ||
+        userByCode.get(p.empCode.replace(/^0+/, ''));
+
       if (!user) {
         errorsSet.add(`Trabajador no encontrado para código: ${p.empCode}`);
+        unmatchedToSave.push({
+          rawCode: p.empCode,
+          punchTime: p.punchTime,
+          type: p.method,
+          serialNo: p.serialNo,
+        });
         continue;
       }
 
@@ -143,8 +182,9 @@ export async function POST(req: NextRequest) {
       }
 
       const [workHour, workMin] = user.workStartTime.split(':').map(Number);
+      const methodLabel = p.method === 'PRESENTIAL_NFC' ? 'Tarjeta RFID' : 'Huella';
 
-      // A) Primera marcación del día (o reemplazo de falta injustificada previa) -> CHECK_IN
+      // A) Primera marcación del día -> CHECK_IN
       if (!record || record.status === 'ABSENT' || !record.checkIn) {
         const graceLimitTime = new Date(p.punchTime);
         graceLimitTime.setHours(workHour, workMin + user.toleranceMinutes, 0, 0);
@@ -164,12 +204,11 @@ export async function POST(req: NextRequest) {
         }
 
         if (record && record.id) {
-          // Actualizar el registro ABSENT existente convirtiéndolo en marcación válida
           record.checkIn = p.punchTime;
-          record.type = 'BIOMETRIC_FINGERPRINT';
+          record.type = p.method;
           record.status = status;
           record.lateMinutes = lateMinutes;
-          record.observations = `Sincronizado desde Biométrico (${p.serialNo})`;
+          record.observations = `Sincronizado desde Biométrico - ${methodLabel} (${p.serialNo})`;
           toUpdate.set(record.id, record);
         } else {
           const newRec = {
@@ -179,7 +218,7 @@ export async function POST(req: NextRequest) {
             lunchStart: null as Date | null,
             lunchEnd: null as Date | null,
             checkOut: null as Date | null,
-            type: 'BIOMETRIC_FINGERPRINT',
+            type: p.method,
             status,
             lateMinutes,
             overtimeMinutes: 0,
@@ -188,7 +227,7 @@ export async function POST(req: NextRequest) {
             latitude: company.officeLat,
             longitude: company.officeLng,
             employeeSignature: user.signatureBase64 || null,
-            observations: `Sincronizado desde Biométrico (${p.serialNo})`,
+            observations: `Sincronizado desde Biométrico - ${methodLabel} (${p.serialNo})`,
             _isNew: true,
           };
           recordMap.set(mapKey, newRec);
@@ -199,7 +238,7 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      // B) Marcaciones siguientes del mismo día -> CHECK_OUT + Refrigerio + HE
+      // B) Marcaciones siguientes del día -> CHECK_OUT + Refrigerio + HE
       const lunchWindowStartStr = company.lunchWindowStart || '13:00';
       const lunchDurationMinutes = company.lunchDurationMinutes ?? 60;
       const lunchDays = Array.isArray(company.lunchDays)
@@ -256,7 +295,13 @@ export async function POST(req: NextRequest) {
       processed++;
     }
 
-    // 4. Persistencia masiva en PostgreSQL
+    // 4. Persistencia en PostgreSQL
+    if (unmatchedToSave.length > 0) {
+      await prisma.unmatchedBiometricLog.createMany({
+        data: unmatchedToSave,
+      });
+    }
+
     if (toCreate.length > 0) {
       await prisma.attendanceRecord.createMany({
         data: toCreate.map(({ _isNew, ...clean }) => clean),

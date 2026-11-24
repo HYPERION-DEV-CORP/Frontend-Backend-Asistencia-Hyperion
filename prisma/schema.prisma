@@ -334,3 +334,16 @@ model BiometricSyncJob {
   createdAt    DateTime @default(now())
   completedAt  DateTime?
 }
+
+model UnmatchedBiometricLog {
+  id            String         @id @default(cuid())
+  rawCode       String         // DNI o biometricCode enviado por el reloj
+  punchTime     DateTime
+  type          AttendanceType @default(BIOMETRIC_FINGERPRINT)
+  serialNo      String?
+  resolved      Boolean        @default(false)
+  resolvedUserId String?
+  createdAt     DateTime       @default(now())
+
+  @@index([rawCode, resolved])
+}
