@@ -1,48 +1,49 @@
-/*
-  Warnings:
+-- CreateEnum (seguro si ya existe)
+DO $$ BEGIN
+    CREATE TYPE "SubscriptionPlan" AS ENUM ('TRIAL', 'BASIC', 'PRO', 'ENTERPRISE');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
-  - A unique constraint covering the columns `[userId,date]` on the table `AttendanceRecord` will be added. If there are existing duplicate values, this will fail.
-  - A unique constraint covering the columns `[biometricCode]` on the table `User` will be added. If there are existing duplicate values, this will fail.
-  - A unique constraint covering the columns `[resetToken]` on the table `User` will be added. If there are existing duplicate values, this will fail.
-  - Added the required column `updatedAt` to the `Company` table without a default value. This is not possible if the table is not empty.
+DO $$ BEGIN
+    CREATE TYPE "SubscriptionStatus" AS ENUM ('ACTIVE', 'EXPIRED', 'SUSPENDED');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
-*/
--- CreateEnum
-CREATE TYPE "SubscriptionPlan" AS ENUM ('TRIAL', 'BASIC', 'PRO', 'ENTERPRISE');
+-- AlterTable AttendanceRecord
+ALTER TABLE "AttendanceRecord"
+    ADD COLUMN IF NOT EXISTS "tareoObservation" TEXT,
+    ALTER COLUMN "latitude" SET DEFAULT -14.078775,
+    ALTER COLUMN "longitude" SET DEFAULT -75.751176;
 
--- CreateEnum
-CREATE TYPE "SubscriptionStatus" AS ENUM ('ACTIVE', 'EXPIRED', 'SUSPENDED');
+-- AlterTable Company (con DEFAULT CURRENT_TIMESTAMP en updatedAt para evitar error si hay filas)
+ALTER TABLE "Company"
+    ADD COLUMN IF NOT EXISTS "enabledModules" TEXT[] DEFAULT ARRAY['ATTENDANCE_QR', 'AUTO_ABSENCE_CRON', 'PLAME_EXPORT', 'AUDIT_FORENSIC']::TEXT[],
+    ADD COLUMN IF NOT EXISTS "lunchDays" INTEGER[] DEFAULT ARRAY[1, 2, 3, 4, 5]::INTEGER[],
+    ADD COLUMN IF NOT EXISTS "lunchDurationMinutes" INTEGER NOT NULL DEFAULT 60,
+    ADD COLUMN IF NOT EXISTS "lunchWindowEnd" TEXT NOT NULL DEFAULT '13:30',
+    ADD COLUMN IF NOT EXISTS "lunchWindowStart" TEXT NOT NULL DEFAULT '13:00',
+    ADD COLUMN IF NOT EXISTS "planType" "SubscriptionPlan" NOT NULL DEFAULT 'TRIAL',
+    ADD COLUMN IF NOT EXISTS "saturdayWorkHours" DOUBLE PRECISION NOT NULL DEFAULT 4.5,
+    ADD COLUMN IF NOT EXISTS "subscriptionStatus" "SubscriptionStatus" NOT NULL DEFAULT 'ACTIVE',
+    ADD COLUMN IF NOT EXISTS "trialEndsAt" TIMESTAMP(3),
+    ADD COLUMN IF NOT EXISTS "trialStartsAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
--- AlterTable
-ALTER TABLE "AttendanceRecord" ADD COLUMN     "tareoObservation" TEXT,
-ALTER COLUMN "latitude" SET DEFAULT -14.078775,
-ALTER COLUMN "longitude" SET DEFAULT -75.751176;
-
--- AlterTable
-ALTER TABLE "Company" ADD COLUMN     "enabledModules" TEXT[] DEFAULT ARRAY['ATTENDANCE_QR', 'AUTO_ABSENCE_CRON', 'PLAME_EXPORT', 'AUDIT_FORENSIC']::TEXT[],
-ADD COLUMN     "lunchDays" INTEGER[] DEFAULT ARRAY[1, 2, 3, 4, 5]::INTEGER[],
-ADD COLUMN     "lunchDurationMinutes" INTEGER NOT NULL DEFAULT 60,
-ADD COLUMN     "lunchWindowEnd" TEXT NOT NULL DEFAULT '13:30',
-ADD COLUMN     "lunchWindowStart" TEXT NOT NULL DEFAULT '13:00',
-ADD COLUMN     "planType" "SubscriptionPlan" NOT NULL DEFAULT 'TRIAL',
-ADD COLUMN     "saturdayWorkHours" DOUBLE PRECISION NOT NULL DEFAULT 4.5,
-ADD COLUMN     "subscriptionStatus" "SubscriptionStatus" NOT NULL DEFAULT 'ACTIVE',
-ADD COLUMN     "trialEndsAt" TIMESTAMP(3),
-ADD COLUMN     "trialStartsAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-ADD COLUMN     "updatedAt" TIMESTAMP(3) NOT NULL;
-
--- AlterTable
-ALTER TABLE "User" ADD COLUMN     "biometricCode" TEXT,
-ADD COLUMN     "isActive" BOOLEAN NOT NULL DEFAULT true,
-ADD COLUMN     "isSubjectToSupervision" BOOLEAN NOT NULL DEFAULT true,
-ADD COLUMN     "pensionRate" DOUBLE PRECISION NOT NULL DEFAULT 13.0,
-ADD COLUMN     "pensionSystem" TEXT NOT NULL DEFAULT 'AFP',
-ADD COLUMN     "resetToken" TEXT,
-ADD COLUMN     "resetTokenExpiresAt" TIMESTAMP(3),
-ADD COLUMN     "signatureBase64" TEXT;
+-- AlterTable User
+ALTER TABLE "User"
+    ADD COLUMN IF NOT EXISTS "biometricCode" TEXT,
+    ADD COLUMN IF NOT EXISTS "isActive" BOOLEAN NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS "isSubjectToSupervision" BOOLEAN NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS "pensionRate" DOUBLE PRECISION NOT NULL DEFAULT 13.0,
+    ADD COLUMN IF NOT EXISTS "pensionSystem" TEXT NOT NULL DEFAULT 'AFP',
+    ADD COLUMN IF NOT EXISTS "resetToken" TEXT,
+    ADD COLUMN IF NOT EXISTS "resetTokenExpiresAt" TIMESTAMP(3),
+    ADD COLUMN IF NOT EXISTS "signatureBase64" TEXT;
 
 -- CreateTable
-CREATE TABLE "MonthlyAttendanceSignOff" (
+CREATE TABLE IF NOT EXISTS "MonthlyAttendanceSignOff" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "year" INTEGER NOT NULL,
@@ -55,8 +56,7 @@ CREATE TABLE "MonthlyAttendanceSignOff" (
     CONSTRAINT "MonthlyAttendanceSignOff_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
-CREATE TABLE "BiometricSyncJob" (
+CREATE TABLE IF NOT EXISTS "BiometricSyncJob" (
     "id" TEXT NOT NULL,
     "type" TEXT NOT NULL DEFAULT 'AUTO',
     "month" INTEGER,
@@ -72,8 +72,7 @@ CREATE TABLE "BiometricSyncJob" (
     CONSTRAINT "BiometricSyncJob_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
-CREATE TABLE "UnmatchedBiometricLog" (
+CREATE TABLE IF NOT EXISTS "UnmatchedBiometricLog" (
     "id" TEXT NOT NULL,
     "rawCode" TEXT NOT NULL,
     "punchTime" TIMESTAMP(3) NOT NULL,
@@ -87,19 +86,17 @@ CREATE TABLE "UnmatchedBiometricLog" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "MonthlyAttendanceSignOff_userId_year_month_key" ON "MonthlyAttendanceSignOff"("userId", "year", "month");
+CREATE UNIQUE INDEX IF NOT EXISTS "MonthlyAttendanceSignOff_userId_year_month_key" ON "MonthlyAttendanceSignOff"("userId", "year", "month");
+CREATE INDEX IF NOT EXISTS "UnmatchedBiometricLog_rawCode_resolved_idx" ON "UnmatchedBiometricLog"("rawCode", "resolved");
+CREATE UNIQUE INDEX IF NOT EXISTS "AttendanceRecord_userId_date_key" ON "AttendanceRecord"("userId", "date");
+CREATE UNIQUE INDEX IF NOT EXISTS "User_biometricCode_key" ON "User"("biometricCode");
+CREATE UNIQUE INDEX IF NOT EXISTS "User_resetToken_key" ON "User"("resetToken");
 
--- CreateIndex
-CREATE INDEX "UnmatchedBiometricLog_rawCode_resolved_idx" ON "UnmatchedBiometricLog"("rawCode", "resolved");
-
--- CreateIndex
-CREATE UNIQUE INDEX "AttendanceRecord_userId_date_key" ON "AttendanceRecord"("userId", "date");
-
--- CreateIndex
-CREATE UNIQUE INDEX "User_biometricCode_key" ON "User"("biometricCode");
-
--- CreateIndex
-CREATE UNIQUE INDEX "User_resetToken_key" ON "User"("resetToken");
-
--- AddForeignKey
-ALTER TABLE "MonthlyAttendanceSignOff" ADD CONSTRAINT "MonthlyAttendanceSignOff_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+-- AddForeignKey (seguro si ya existe)
+DO $$ BEGIN
+    ALTER TABLE "MonthlyAttendanceSignOff"
+        ADD CONSTRAINT "MonthlyAttendanceSignOff_userId_fkey"
+        FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
