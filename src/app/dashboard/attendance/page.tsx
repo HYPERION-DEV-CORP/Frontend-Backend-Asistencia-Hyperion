@@ -136,7 +136,7 @@ export default function HRDashboard() {
   // Estado para Auditoría Manual de Faltas
   const [auditingAbsences, setAuditingAbsences] = useState(false);
 
-  const loadData = async (runSilentAbsenceCheck = false) => {
+  const loadData = async (runSilentAbsenceCheck = false, isBackgroundRefresh = false) => {
     try {
       if (runSilentAbsenceCheck) {
         const todayKey = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -152,10 +152,10 @@ export default function HRDashboard() {
       }
 
       const [resRecords, resUsers, resPeriods, resSub] = await Promise.all([
-        fetch('/api/v1/hr/records'),
-        fetch('/api/v1/users'),
-        fetch('/api/v1/hr/payroll/periods'),
-        fetch('/api/v1/admin/subscription'),
+        fetch('/api/v1/hr/records', { cache: 'no-store' }),
+        fetch('/api/v1/users', { cache: 'no-store' }),
+        fetch('/api/v1/hr/payroll/periods', { cache: 'no-store' }),
+        fetch('/api/v1/admin/subscription', { cache: 'no-store' }),
       ]);
 
       if (resRecords.ok) {
@@ -180,15 +180,39 @@ export default function HRDashboard() {
         }
       }
     } catch (err) {
-      console.error('Error cargando datos del dashboard:', err);
+      if (!isBackgroundRefresh) {
+        console.error('Error cargando datos del dashboard:', err);
+      }
     } finally {
-      setLoading(false);
+      if (!isBackgroundRefresh) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    loadData(false);
-  }, []);
+    loadData(false, false);
+
+    // Actualizar automáticamente cada 10 segundos si la pestaña está activa y no hay modales abiertos
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible' && !showEditModal && !showHolidayModal && !showBioModal) {
+        loadData(false, true);
+      }
+    }, 10000);
+
+    // Refrescar inmediatamente cuando el usuario vuelve a la pestaña del navegador
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        loadData(false, true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [showEditModal, showHolidayModal, showBioModal]);
 
   const loadSyncJobs = async () => {
     try {
