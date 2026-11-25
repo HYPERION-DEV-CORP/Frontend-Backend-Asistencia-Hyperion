@@ -1,7 +1,10 @@
-// src/app/api/v1/users/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import bcrypt from 'bcryptjs';
+import {
+  BiometricPunchInput,
+  processBiometricPunches,
+} from '@/lib/biometric-processor';
 
 // 1. OBTENER LISTA DE TRABAJADORES
 export async function GET() {
@@ -96,10 +99,63 @@ export async function POST(req: NextRequest) {
       },
     });
 
+    // Recuperar y reasignar marcaciones biométricas pendientes (Mejora D)
+    let recoveredPunches = 0;
+    const candidateCodes = new Set<string>([newUser.dni, newUser.dni.replace(/^0+/, '')]);
+    if (newUser.biometricCode) {
+      candidateCodes.add(newUser.biometricCode);
+      candidateCodes.add(newUser.biometricCode.replace(/^0+/, ''));
+    }
+
+    const unmatchedLogs = await prisma.unmatchedBiometricLog.findMany({
+      where: {
+        resolved: false,
+        rawCode: { in: Array.from(candidateCodes).filter(Boolean) },
+      },
+      orderBy: { punchTime: 'asc' },
+    });
+
+    if (unmatchedLogs.length > 0) {
+      const punchesToRecover: BiometricPunchInput[] = unmatchedLogs.map((log) => {
+        // Convertir punchTime a fecha calendario Perú (UTC-5)
+        const peruTime = new Date(log.punchTime.getTime() - 5 * 60 * 60 * 1000);
+        const dayKey = peruTime.toISOString().slice(0, 10);
+        const dayDate = new Date(`${dayKey}T00:00:00.000Z`);
+
+        return {
+          empCode: newUser.dni,
+          serialNo: log.serialNo || 'Reloj',
+          method: log.type,
+          punchTime: log.punchTime,
+          dayKey,
+          dayDate,
+        };
+      });
+
+      const recoveryResult = await processBiometricPunches(punchesToRecover, {
+        saveUnmatched: false,
+      });
+      recoveredPunches = recoveryResult.processed;
+
+      await prisma.unmatchedBiometricLog.updateMany({
+        where: { id: { in: unmatchedLogs.map((l) => l.id) } },
+        data: {
+          resolved: true,
+          resolvedUserId: newUser.id,
+        },
+      });
+    }
+
+    const extraMsg =
+      recoveredPunches > 0
+        ? ` Se recuperaron y sincronizaron automáticamente ${recoveredPunches} marcación(es) previa(s) del reloj biométrico.`
+        : '';
+
     return NextResponse.json({
       success: true,
-      message: 'Trabajador registrado con éxito. Contraseña inicial: 123456',
+      message: `Trabajador registrado con éxito. Contraseña inicial: 123456.${extraMsg}`,
       user: newUser,
+      recoveredPunches,
     });
   } catch (error: any) {
     console.error('Error registrando trabajador:', error);
