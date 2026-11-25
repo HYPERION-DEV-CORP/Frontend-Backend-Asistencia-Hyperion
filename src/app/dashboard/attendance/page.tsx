@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import BiometricSimulatorPanel from '@/app/components/BiometricSimulatorPanel';
 
 interface AttendanceRecord {
   id: string;
@@ -676,12 +675,6 @@ export default function HRDashboard() {
           </button>
         </div>
       </header>
-
-      {/* Laboratorio de Pruebas Biométricas (Demo Físico en Vivo y Escenarios Simulados) */}
-      <BiometricSimulatorPanel
-        users={users}
-        onExecuted={() => loadData(false, false)}
-      />
 
       {/* Grilla de 4 Tarjetas KPI */}
       <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
