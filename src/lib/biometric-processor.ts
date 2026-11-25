@@ -20,6 +20,28 @@ function parseTimeHHMM(
   return [isNaN(h) ? fallbackH : h, isNaN(m) ? fallbackM : m];
 }
 
+/**
+ * Extrae día de semana, hora y minutos en hora oficial de Perú (UTC-5),
+ * evitando desfases si el servidor en la nube corre en UTC.
+ */
+function getPeruTimeParts(date: Date) {
+  const peruDate = new Date(date.getTime() - 5 * 60 * 60 * 1000);
+  const dayOfWeek = peruDate.getUTCDay(); // 0 = Dom, 6 = Sáb
+  const hour = peruDate.getUTCHours();
+  const minute = peruDate.getUTCMinutes();
+  const totalMinutes = hour * 60 + minute;
+  return { dayOfWeek, hour, minute, totalMinutes };
+}
+
+/**
+ * Construye un Date en UTC correspondiente a una hora específica (HH:mm) del día Perú (dayKey: YYYY-MM-DD).
+ */
+function buildPeruDateTime(dayKey: string, hour: number, minute: number): Date {
+  const hh = String(hour).padStart(2, '0');
+  const mm = String(minute).padStart(2, '0');
+  return new Date(`${dayKey}T${hh}:${mm}:00.000-05:00`);
+}
+
 export async function processBiometricPunches(
   parsedPunches: BiometricPunchInput[],
   options: { saveUnmatched?: boolean } = { saveUnmatched: true }
@@ -28,6 +50,7 @@ export async function processBiometricPunches(
     return { processed: 0, errors: [] as string[] };
   }
 
+  // Orden cronológico ascendente: garantiza evaluar siempre primero la marcación más temprana
   parsedPunches.sort((a, b) => a.punchTime.getTime() - b.punchTime.getTime());
 
   const errorsSet = new Set<string>();
@@ -120,64 +143,41 @@ export async function processBiometricPunches(
       continue;
     }
 
-    const mapKey = `${user.id}_${p.dayKey}`;
-    const record = recordMap.get(mapKey);
-    const company = user.company;
+    const { dayOfWeek, totalMinutes } = getPeruTimeParts(p.punchTime);
+    const isSaturday = dayOfWeek === 6;
+    const isSunday = dayOfWeek === 0;
 
-    if (record) {
-      const existingTimes = [
-        record.checkIn,
-        record.lunchStart,
-        record.lunchEnd,
-        record.checkOut,
-      ]
-        .filter(Boolean)
-        .map((d) => new Date(d).getTime());
-      if (existingTimes.some((t) => Math.abs(t - p.punchTime.getTime()) < 120_000)) {
-        continue;
-      }
+    // Ignorar domingos salvo autorización manual de RRHH
+    if (isSunday) {
+      continue;
     }
 
-    const [workHour, workMin] = user.workStartTime.split(':').map(Number);
+    const mapKey = `${user.id}_${p.dayKey}`;
+    let record = recordMap.get(mapKey);
+    const company = user.company;
+
+    const [workHour, workMin] = parseTimeHHMM(user.workStartTime, 9, 0);
     const methodLabel = p.method === 'PRESENTIAL_NFC' ? 'Tarjeta RFID' : 'Huella';
 
-    // A) Primera marcación del día -> CHECK_IN
-    if (!record || record.status === 'ABSENT' || !record.checkIn) {
-      const graceLimitTime = new Date(p.punchTime);
-      graceLimitTime.setHours(workHour, workMin + user.toleranceMinutes, 0, 0);
+    // Franjas horarias en minutos desde las 00:00 (Hora Perú)
+    const NOON_MINUTES = 12 * 60; // 12:00 PM (720)
+    const LUNCH_START_MIN = 13 * 60; // 01:00 PM (780)
+    const LUNCH_END_MAX = 13 * 60 + 30; // 01:30 PM (810)
+    const CHECKOUT_MIN_WEEKDAY = 17 * 60; // 05:00 PM (1020)
 
-      let lateMinutes = 0;
-      let status: 'PRESENT' | 'LATE' = 'PRESENT';
-
-      if (p.punchTime > graceLimitTime) {
-        status = 'LATE';
-        const expectedTime = new Date(p.punchTime);
-        expectedTime.setHours(workHour, workMin, 0, 0);
-        lateMinutes = Math.max(
-          0,
-          Math.floor((p.punchTime.getTime() - expectedTime.getTime()) / 60_000) -
-            user.toleranceMinutes
-        );
-      }
-
-      if (record && record.id) {
-        record.checkIn = p.punchTime;
-        record.type = p.method;
-        record.status = status;
-        record.lateMinutes = lateMinutes;
-        record.observations = `Sincronizado desde Biométrico - ${methodLabel} (${p.serialNo})`;
-        toUpdate.set(record.id, record);
-      } else {
-        const newRec = {
+    // Helper interno para asegurar que exista el objeto AttendanceRecord del día
+    const ensureDayRecord = () => {
+      if (!record) {
+        record = {
           userId: user.id,
           date: p.dayDate,
-          checkIn: p.punchTime,
+          checkIn: null as Date | null,
           lunchStart: null as Date | null,
           lunchEnd: null as Date | null,
           checkOut: null as Date | null,
           type: p.method,
-          status,
-          lateMinutes,
+          status: 'PRESENT',
+          lateMinutes: 0,
           overtimeMinutes: 0,
           overtime25Minutes: 0,
           overtime35Minutes: 0,
@@ -187,69 +187,173 @@ export async function processBiometricPunches(
           observations: `Sincronizado desde Biométrico - ${methodLabel} (${p.serialNo})`,
           _isNew: true,
         };
-        recordMap.set(mapKey, newRec);
-        toCreate.push(newRec);
+        recordMap.set(mapKey, record);
+        toCreate.push(record);
+      } else if (record.status === 'ABSENT') {
+        record.status = 'PRESENT';
+        record.type = p.method;
+        record.observations = `Sincronizado desde Biométrico - ${methodLabel} (${p.serialNo})`;
+        if (!record._isNew && record.id) toUpdate.set(record.id, record);
       }
+      return record;
+    };
 
-      processed++;
+    // =========================================================================
+    // REGLA 1: ENTRADA (Lunes a Sábado únicamente ANTES de las 12:00 PM)
+    // =========================================================================
+    if (totalMinutes < NOON_MINUTES) {
+      const rec = ensureDayRecord();
+
+      // Si ya existe una entrada previa, conservar siempre la más temprana (más baja)
+      if (!rec.checkIn || p.punchTime < new Date(rec.checkIn)) {
+        const expectedTime = buildPeruDateTime(p.dayKey, workHour, workMin);
+        const graceLimitTime = new Date(
+          expectedTime.getTime() + user.toleranceMinutes * 60_000
+        );
+
+        let lateMinutes = 0;
+        let status: 'PRESENT' | 'LATE' = 'PRESENT';
+
+        if (p.punchTime > graceLimitTime) {
+          status = 'LATE';
+          lateMinutes = Math.max(
+            0,
+            Math.floor((p.punchTime.getTime() - expectedTime.getTime()) / 60_000) -
+              user.toleranceMinutes
+          );
+        }
+
+        rec.checkIn = p.punchTime;
+        rec.type = p.method;
+        rec.status = status;
+        rec.lateMinutes = lateMinutes;
+        rec.observations = `Sincronizado desde Biométrico - ${methodLabel} (${p.serialNo})`;
+
+        if (!rec._isNew && rec.id) {
+          toUpdate.set(rec.id, rec);
+        }
+        processed++;
+      }
       continue;
     }
 
-    // B) Marcaciones siguientes del día -> CHECK_OUT + Refrigerio + HE
-    const lunchWindowStartStr = company.lunchWindowStart || '13:00';
-    const lunchDurationMinutes = company.lunchDurationMinutes ?? 60;
-    const lunchDays = Array.isArray(company.lunchDays)
-      ? company.lunchDays
-      : [1, 2, 3, 4, 5];
-    const saturdayWorkHours = company.saturdayWorkHours ?? 4.5;
+    // =========================================================================
+    // REGLA 3: SÁBADOS (>= 12:00 PM) -> SALIDA DIRECTA (SIN REFRIGERIO)
+    // =========================================================================
+    if (isSaturday) {
+      // A partir de las 12:00 PM en sábado se toma como salida
+      const rec = ensureDayRecord();
 
-    const dayOfWeek = p.dayDate.getDay();
-    const isSaturday = dayOfWeek === 6;
-    const hasLunchToday = lunchDays.includes(dayOfWeek);
-    const effectiveDayHours = isSaturday
-      ? saturdayWorkHours
-      : user.payrollPolicy?.hoursPerDay || 8.0;
-    const lunchMinutesToday = hasLunchToday ? lunchDurationMinutes : 0;
+      // Conservar la primera marcación válida de salida (>= 12:00 PM) ante duplicados
+      if (!rec.checkOut || p.punchTime < new Date(rec.checkOut)) {
+        const saturdayWorkHours = company.saturdayWorkHours ?? 4.5;
+        const expectedStart = buildPeruDateTime(p.dayKey, workHour, workMin);
+        const officialCheckOut = new Date(
+          expectedStart.getTime() + Math.round(saturdayWorkHours * 60) * 60_000
+        );
 
-    const officialCheckOut = new Date(p.dayDate);
-    officialCheckOut.setHours(workHour, workMin, 0, 0);
-    officialCheckOut.setMinutes(
-      officialCheckOut.getMinutes() +
-        Math.round(effectiveDayHours * 60) +
-        lunchMinutesToday
-    );
+        const totalOvertimeMinutes =
+          p.punchTime > officialCheckOut
+            ? Math.floor((p.punchTime.getTime() - officialCheckOut.getTime()) / 60_000)
+            : 0;
 
-    const [winStartH, winStartM] = parseTimeHHMM(lunchWindowStartStr, 13, 0);
-    const defaultLunchStart = new Date(p.dayDate);
-    defaultLunchStart.setHours(winStartH, winStartM, 0, 0);
-    const defaultLunchEnd = new Date(defaultLunchStart);
-    defaultLunchEnd.setMinutes(defaultLunchEnd.getMinutes() + lunchDurationMinutes);
+        rec.checkOut = p.punchTime;
+        rec.lunchStart = null;
+        rec.lunchEnd = null;
+        rec.overtimeMinutes = totalOvertimeMinutes;
+        rec.overtime25Minutes = Math.min(totalOvertimeMinutes, 120);
+        rec.overtime35Minutes = Math.max(0, totalOvertimeMinutes - 120);
 
-    const shouldAutoAssignLunch =
-      hasLunchToday &&
-      !record.lunchStart &&
-      !record.lunchEnd &&
-      new Date(record.checkIn) < defaultLunchStart &&
-      p.punchTime > defaultLunchEnd;
-
-    const totalOvertimeMinutes =
-      p.punchTime > officialCheckOut
-        ? Math.floor((p.punchTime.getTime() - officialCheckOut.getTime()) / 60_000)
-        : 0;
-
-    record.checkOut = p.punchTime;
-    if (shouldAutoAssignLunch) {
-      record.lunchStart = defaultLunchStart;
-      record.lunchEnd = defaultLunchEnd;
+        if (!rec._isNew && rec.id) {
+          toUpdate.set(rec.id, rec);
+        }
+        processed++;
+      }
+      continue;
     }
-    record.overtimeMinutes = totalOvertimeMinutes;
-    record.overtime25Minutes = Math.min(totalOvertimeMinutes, 120);
-    record.overtime35Minutes = Math.max(0, totalOvertimeMinutes - 120);
 
-    if (!record._isNew && record.id) {
-      toUpdate.set(record.id, record);
+    // =========================================================================
+    // REGLA 2: LUNES A VIERNES - INICIO DE REFRIGERIO (01:00 PM a 01:30 PM)
+    // =========================================================================
+    if (totalMinutes >= LUNCH_START_MIN && totalMinutes <= LUNCH_END_MAX) {
+      const rec = ensureDayRecord();
+
+      // Conservar siempre la primera marcación dentro de 1:00 pm - 1:30 pm ante duplicados
+      if (!rec.lunchStart || p.punchTime < new Date(rec.lunchStart)) {
+        rec.lunchStart = p.punchTime;
+        if (!rec._isNew && rec.id) {
+          toUpdate.set(rec.id, rec);
+        }
+        processed++;
+      }
+      continue;
     }
-    processed++;
+
+    // =========================================================================
+    // LUNES A VIERNES - RETORNO DE REFRIGERIO (01:31 PM a 04:59 PM)
+    // =========================================================================
+    if (totalMinutes > LUNCH_END_MAX && totalMinutes < CHECKOUT_MIN_WEEKDAY) {
+      // Solo se registra fin de refrigerio si previamente marcó inicio de refrigerio
+      if (record && record.lunchStart && !record.lunchEnd) {
+        // Evitar doble lectura inmediata (< 5 minutos después de iniciar refrigerio)
+        const diffFromStartMs = p.punchTime.getTime() - new Date(record.lunchStart).getTime();
+        if (diffFromStartMs >= 5 * 60_000) {
+          record.lunchEnd = p.punchTime;
+          if (!record._isNew && record.id) {
+            toUpdate.set(record.id, record);
+          }
+          processed++;
+        }
+      }
+      // Antes de las 5:00 PM nunca se registra como salida en Lunes-Viernes
+      continue;
+    }
+
+    // =========================================================================
+    // REGLA 1B: LUNES A VIERNES - SALIDA (A partir de las 05:00 PM en adelante)
+    // =========================================================================
+    if (totalMinutes >= CHECKOUT_MIN_WEEKDAY) {
+      const rec = ensureDayRecord();
+      const lunchDurationMinutes = company.lunchDurationMinutes ?? 60;
+      const lunchDays = Array.isArray(company.lunchDays)
+        ? company.lunchDays
+        : [1, 2, 3, 4, 5];
+      const hasLunchToday = lunchDays.includes(dayOfWeek);
+
+      // Si marcó inicio de refrigerio (1:00-1:30 pm) pero olvidó marcar retorno, completarlo automáticamente
+      if (rec.lunchStart && !rec.lunchEnd) {
+        rec.lunchEnd = new Date(
+          new Date(rec.lunchStart).getTime() + lunchDurationMinutes * 60_000
+        );
+      }
+
+      // Conservar la primera marcación de salida >= 5:00 PM ante duplicados en el reloj
+      if (!rec.checkOut || p.punchTime < new Date(rec.checkOut)) {
+        const effectiveDayHours = user.payrollPolicy?.hoursPerDay || 8.0;
+        const lunchMinutesToday = hasLunchToday ? lunchDurationMinutes : 0;
+
+        const expectedStart = buildPeruDateTime(p.dayKey, workHour, workMin);
+        const officialCheckOut = new Date(
+          expectedStart.getTime() +
+            (Math.round(effectiveDayHours * 60) + lunchMinutesToday) * 60_000
+        );
+
+        const totalOvertimeMinutes =
+          p.punchTime > officialCheckOut
+            ? Math.floor((p.punchTime.getTime() - officialCheckOut.getTime()) / 60_000)
+            : 0;
+
+        rec.checkOut = p.punchTime;
+        rec.overtimeMinutes = totalOvertimeMinutes;
+        rec.overtime25Minutes = Math.min(totalOvertimeMinutes, 120);
+        rec.overtime35Minutes = Math.max(0, totalOvertimeMinutes - 120);
+
+        if (!rec._isNew && rec.id) {
+          toUpdate.set(rec.id, rec);
+        }
+        processed++;
+      }
+    }
   }
 
   // Persistencia con deduplicación en UnmatchedBiometricLog
