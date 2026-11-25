@@ -94,7 +94,6 @@ model Company {
   lunchDurationMinutes Int     @default(60)      // Duración reglamentaria (mínimo 45 min según D.S. N° 007-2002-TR)
   lunchDays            Int[]   @default([1, 2, 3, 4, 5]) // 1=Lun ... 5=Vie (6=Sáb si aplica)
   saturdayWorkHours    Float   @default(4.5)     // Horas de jornada los sábados (0 si no trabajan sábados)
-  biometricDemoMode    Boolean @default(false)   // Modo laboratorio para pruebas en vivo (4 marcaciones consecutivas)
 }
 
 model User {

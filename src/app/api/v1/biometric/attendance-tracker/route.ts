@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AttendanceType } from '@prisma/client';
-import { prisma } from '@/lib/prisma';
 import {
   BiometricPunchInput,
   processBiometricPunches,
@@ -56,25 +55,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Consultar si el Modo Demo Físico está activado desde el panel web o por variable de entorno
-    const company = await prisma.company.findFirst({
-      select: { biometricDemoMode: true },
-    });
-
-    const isDemoMode =
-      Boolean(company?.biometricDemoMode) ||
-      process.env.BIOMETRIC_DEMO_MODE === 'true' ||
-      searchParams.get('demo') === 'true';
-
     const result = await processBiometricPunches(parsedPunches, {
       saveUnmatched: true,
-      demoMode: isDemoMode,
     });
 
     return NextResponse.json({
       status: 'success',
       processed: result.processed,
-      demoMode: isDemoMode,
       errors: result.errors,
     });
   } catch (error: any) {
