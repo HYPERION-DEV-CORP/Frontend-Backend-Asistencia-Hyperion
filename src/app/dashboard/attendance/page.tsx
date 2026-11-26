@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import BiometricScheduleModal from '@/app/components/BiometricScheduleModal';
 
 interface AttendanceRecord {
   id: string;
@@ -121,6 +122,7 @@ export default function HRDashboard() {
 
   // Estados para Sincronización / Importación Biométrica
   const [showBioModal, setShowBioModal] = useState(false);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [bioMode, setBioMode] = useState<'DIRECT_SYNC' | 'FILE_UPLOAD'>('DIRECT_SYNC');
   const [bioFile, setBioFile] = useState<File | null>(null);
   const [bioFilterType, setBioFilterType] = useState<'ALL' | 'SINGLE_MONTH' | 'RANGE'>('SINGLE_MONTH');
@@ -195,7 +197,13 @@ export default function HRDashboard() {
 
     // Actualizar automáticamente cada 10 segundos si la pestaña está activa y no hay modales abiertos
     const interval = setInterval(() => {
-      if (document.visibilityState === 'visible' && !showEditModal && !showHolidayModal && !showBioModal) {
+      if (
+        document.visibilityState === 'visible' &&
+        !showEditModal &&
+        !showHolidayModal &&
+        !showBioModal &&
+        !showScheduleModal
+      ) {
         loadData(false, true);
       }
     }, 10000);
@@ -212,7 +220,7 @@ export default function HRDashboard() {
       clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [showEditModal, showHolidayModal, showBioModal]);
+  }, [showEditModal, showHolidayModal, showBioModal, showScheduleModal]);
 
   const loadSyncJobs = async () => {
     try {
@@ -621,18 +629,27 @@ export default function HRDashboard() {
 
         <div className="flex flex-wrap items-center gap-2.5">
           {enabledModules.includes('BIOMETRIC_SYNC') && (
-            <button
-              onClick={() => {
-                setBioMode('DIRECT_SYNC');
-                setBioFile(null);
-                setBioSummary(null);
-                setUnmappedBioUsers([]);
-                setShowBioModal(true);
-              }}
-              className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-indigo-700 transition text-sm cursor-pointer"
-            >
-              🧬 Sincronizar Biométrico
-            </button>
+            <>
+              <button
+                onClick={() => {
+                  setBioMode('DIRECT_SYNC');
+                  setBioFile(null);
+                  setBioSummary(null);
+                  setUnmappedBioUsers([]);
+                  setShowBioModal(true);
+                }}
+                className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-indigo-700 transition text-sm cursor-pointer"
+              >
+                🧬 Sincronizar Biométrico
+              </button>
+
+              <button
+                onClick={() => setShowScheduleModal(true)}
+                className="flex items-center gap-2 rounded-lg bg-slate-700 px-4 py-2.5 font-semibold text-white shadow-md hover:bg-slate-800 transition text-sm cursor-pointer"
+              >
+                ⚙️ Franjas Horarias
+              </button>
+            </>
           )}
 
           {enabledModules.includes('AUTO_ABSENCE_CRON') && (
@@ -1371,6 +1388,12 @@ export default function HRDashboard() {
           </div>
         </div>
       )}
+
+      {/* Modal de Franjas Horarias del Reloj Biométrico por Empresa */}
+      <BiometricScheduleModal
+        open={showScheduleModal}
+        onClose={() => setShowScheduleModal(false)}
+      />
 
       {/* Modal de Corrección Manual de RRHH */}
       {showEditModal && selectedRecord && (

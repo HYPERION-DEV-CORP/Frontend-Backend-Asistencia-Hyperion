@@ -89,11 +89,15 @@ model Company {
   updatedAt          DateTime           @updatedAt
   
   // Configuración Dinámica de Refrigerio y Jornada
-  lunchWindowStart     String  @default("13:00") // Hora inicio permitida para salir a refrigerio
-  lunchWindowEnd       String  @default("13:30") // Hora límite para iniciar refrigerio
-  lunchDurationMinutes Int     @default(60)      // Duración reglamentaria (mínimo 45 min según D.S. N° 007-2002-TR)
-  lunchDays            Int[]   @default([1, 2, 3, 4, 5]) // 1=Lun ... 5=Vie (6=Sáb si aplica)
-  saturdayWorkHours    Float   @default(4.5)     // Horas de jornada los sábados (0 si no trabajan sábados)
+  biometricCheckInStart  String  @default("06:00") // Desde qué hora una marcación cuenta como Entrada
+  biometricCheckInEnd    String  @default("11:59") // Hasta qué hora cuenta como Entrada
+  lunchWindowStart       String  @default("13:00") // Hora inicio permitida para salir a refrigerio
+  lunchWindowEnd         String  @default("13:30") // Hora límite para iniciar refrigerio
+  lunchReturnEnd         String  @default("16:59") // Hora límite para registrar retorno de refrigerio
+  lunchDurationMinutes   Int     @default(60)      // Duración reglamentaria (mínimo 45 min según D.S. N° 007-2002-TR)
+  biometricCheckOutStart String  @default("17:00") // Desde qué hora una marcación cuenta como Salida (L-V)
+  lunchDays              Int[]   @default([1, 2, 3, 4, 5]) // 1=Lun ... 5=Vie (6=Sáb si aplica)
+  saturdayWorkHours      Float   @default(4.5)     // Horas de jornada los sábados (0 si no trabajan sábados)
 }
 
 model User {

@@ -10,6 +10,10 @@ export interface BiometricPunchInput {
   dayDate: Date;
 }
 
+export interface ProcessBiometricOptions {
+  saveUnmatched?: boolean;
+}
+
 function parseTimeHHMM(
   timeStr: string | null | undefined,
   fallbackH: number,
@@ -20,10 +24,13 @@ function parseTimeHHMM(
   return [isNaN(h) ? fallbackH : h, isNaN(m) ? fallbackM : m];
 }
 
-/**
- * Extrae día de semana, hora y minutos en hora oficial de Perú (UTC-5),
- * evitando desfases si el servidor en la nube corre en UTC.
- */
+function toTotalMinutes(timeStr: string | null | undefined, fallbackMinutes: number): number {
+  if (!timeStr || !timeStr.includes(':')) return fallbackMinutes;
+  const [h, m] = timeStr.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return fallbackMinutes;
+  return h * 60 + m;
+}
+
 function getPeruTimeParts(date: Date) {
   const peruDate = new Date(date.getTime() - 5 * 60 * 60 * 1000);
   const dayOfWeek = peruDate.getUTCDay(); // 0 = Dom, 6 = Sáb
@@ -33,9 +40,6 @@ function getPeruTimeParts(date: Date) {
   return { dayOfWeek, hour, minute, totalMinutes };
 }
 
-/**
- * Construye un Date en UTC correspondiente a una hora específica (HH:mm) del día Perú (dayKey: YYYY-MM-DD).
- */
 function buildPeruDateTime(dayKey: string, hour: number, minute: number): Date {
   const hh = String(hour).padStart(2, '0');
   const mm = String(minute).padStart(2, '0');
@@ -44,13 +48,12 @@ function buildPeruDateTime(dayKey: string, hour: number, minute: number): Date {
 
 export async function processBiometricPunches(
   parsedPunches: BiometricPunchInput[],
-  options: { saveUnmatched?: boolean } = { saveUnmatched: true }
+  options: ProcessBiometricOptions = { saveUnmatched: true }
 ) {
   if (parsedPunches.length === 0) {
     return { processed: 0, errors: [] as string[] };
   }
 
-  // Orden cronológico ascendente: garantiza evaluar siempre primero la marcación más temprana
   parsedPunches.sort((a, b) => a.punchTime.getTime() - b.punchTime.getTime());
 
   const errorsSet = new Set<string>();
@@ -147,7 +150,6 @@ export async function processBiometricPunches(
     const isSaturday = dayOfWeek === 6;
     const isSunday = dayOfWeek === 0;
 
-    // Ignorar domingos salvo autorización manual de RRHH
     if (isSunday) {
       continue;
     }
@@ -159,13 +161,6 @@ export async function processBiometricPunches(
     const [workHour, workMin] = parseTimeHHMM(user.workStartTime, 9, 0);
     const methodLabel = p.method === 'PRESENTIAL_NFC' ? 'Tarjeta RFID' : 'Huella';
 
-    // Franjas horarias en minutos desde las 00:00 (Hora Perú)
-    const NOON_MINUTES = 12 * 60; // 12:00 PM (720)
-    const LUNCH_START_MIN = 13 * 60; // 01:00 PM (780)
-    const LUNCH_END_MAX = 13 * 60 + 30; // 01:30 PM (810)
-    const CHECKOUT_MIN_WEEKDAY = 17 * 60; // 05:00 PM (1020)
-
-    // Helper interno para asegurar que exista el objeto AttendanceRecord del día
     const ensureDayRecord = () => {
       if (!record) {
         record = {
@@ -198,13 +193,18 @@ export async function processBiometricPunches(
       return record;
     };
 
-    // =========================================================================
-    // REGLA 1: ENTRADA (Lunes a Sábado únicamente ANTES de las 12:00 PM)
-    // =========================================================================
-    if (totalMinutes < NOON_MINUTES) {
+    // Franjas horarias dinámicas configuradas por la empresa (en minutos desde las 00:00)
+    const checkInStartMin = toTotalMinutes(company.biometricCheckInStart, 6 * 60);
+    const checkInEndMin = toTotalMinutes(company.biometricCheckInEnd, 11 * 60 + 59);
+    const lunchStartMin = toTotalMinutes(company.lunchWindowStart, 13 * 60);
+    const lunchEndMax = toTotalMinutes(company.lunchWindowEnd, 13 * 60 + 30);
+    const lunchReturnMax = toTotalMinutes(company.lunchReturnEnd, 16 * 60 + 59);
+    const checkOutMinWeekday = toTotalMinutes(company.biometricCheckOutStart, 17 * 60);
+
+    // 1. ENTRADA (Dentro de la franja de ingreso configurada por la empresa)
+    if (totalMinutes >= checkInStartMin && totalMinutes <= checkInEndMin) {
       const rec = ensureDayRecord();
 
-      // Si ya existe una entrada previa, conservar siempre la más temprana (más baja)
       if (!rec.checkIn || p.punchTime < new Date(rec.checkIn)) {
         const expectedTime = buildPeruDateTime(p.dayKey, workHour, workMin);
         const graceLimitTime = new Date(
@@ -237,14 +237,10 @@ export async function processBiometricPunches(
       continue;
     }
 
-    // =========================================================================
-    // REGLA 3: SÁBADOS (>= 12:00 PM) -> SALIDA DIRECTA (SIN REFRIGERIO)
-    // =========================================================================
-    if (isSaturday) {
-      // A partir de las 12:00 PM en sábado se toma como salida
+    // 2. SÁBADOS (Después de la franja de ingreso -> Salida directa sin refrigerio)
+    if (isSaturday && totalMinutes > checkInEndMin) {
       const rec = ensureDayRecord();
 
-      // Conservar la primera marcación válida de salida (>= 12:00 PM) ante duplicados
       if (!rec.checkOut || p.punchTime < new Date(rec.checkOut)) {
         const saturdayWorkHours = company.saturdayWorkHours ?? 4.5;
         const expectedStart = buildPeruDateTime(p.dayKey, workHour, workMin);
@@ -272,13 +268,10 @@ export async function processBiometricPunches(
       continue;
     }
 
-    // =========================================================================
-    // REGLA 2: LUNES A VIERNES - INICIO DE REFRIGERIO (01:00 PM a 01:30 PM)
-    // =========================================================================
-    if (totalMinutes >= LUNCH_START_MIN && totalMinutes <= LUNCH_END_MAX) {
+    // 3. INICIO DE REFRIGERIO (Dentro de la ventana configurada)
+    if (totalMinutes >= lunchStartMin && totalMinutes <= lunchEndMax) {
       const rec = ensureDayRecord();
 
-      // Conservar siempre la primera marcación dentro de 1:00 pm - 1:30 pm ante duplicados
       if (!rec.lunchStart || p.punchTime < new Date(rec.lunchStart)) {
         rec.lunchStart = p.punchTime;
         if (!rec._isNew && rec.id) {
@@ -289,13 +282,9 @@ export async function processBiometricPunches(
       continue;
     }
 
-    // =========================================================================
-    // LUNES A VIERNES - RETORNO DE REFRIGERIO (01:31 PM a 04:59 PM)
-    // =========================================================================
-    if (totalMinutes > LUNCH_END_MAX && totalMinutes < CHECKOUT_MIN_WEEKDAY) {
-      // Solo se registra fin de refrigerio si previamente marcó inicio de refrigerio
+    // 4. RETORNO DE REFRIGERIO (Entre fin de ventana de salida y límite de retorno)
+    if (totalMinutes > lunchEndMax && totalMinutes <= lunchReturnMax) {
       if (record && record.lunchStart && !record.lunchEnd) {
-        // Evitar doble lectura inmediata (< 5 minutos después de iniciar refrigerio)
         const diffFromStartMs = p.punchTime.getTime() - new Date(record.lunchStart).getTime();
         if (diffFromStartMs >= 5 * 60_000) {
           record.lunchEnd = p.punchTime;
@@ -305,14 +294,11 @@ export async function processBiometricPunches(
           processed++;
         }
       }
-      // Antes de las 5:00 PM nunca se registra como salida en Lunes-Viernes
       continue;
     }
 
-    // =========================================================================
-    // REGLA 1B: LUNES A VIERNES - SALIDA (A partir de las 05:00 PM en adelante)
-    // =========================================================================
-    if (totalMinutes >= CHECKOUT_MIN_WEEKDAY) {
+    // 5. SALIDA (A partir de biometricCheckOutStart en adelante)
+    if (totalMinutes >= checkOutMinWeekday) {
       const rec = ensureDayRecord();
       const lunchDurationMinutes = company.lunchDurationMinutes ?? 60;
       const lunchDays = Array.isArray(company.lunchDays)
@@ -320,14 +306,12 @@ export async function processBiometricPunches(
         : [1, 2, 3, 4, 5];
       const hasLunchToday = lunchDays.includes(dayOfWeek);
 
-      // Si marcó inicio de refrigerio (1:00-1:30 pm) pero olvidó marcar retorno, completarlo automáticamente
       if (rec.lunchStart && !rec.lunchEnd) {
         rec.lunchEnd = new Date(
           new Date(rec.lunchStart).getTime() + lunchDurationMinutes * 60_000
         );
       }
 
-      // Conservar la primera marcación de salida >= 5:00 PM ante duplicados en el reloj
       if (!rec.checkOut || p.punchTime < new Date(rec.checkOut)) {
         const effectiveDayHours = user.payrollPolicy?.hoursPerDay || 8.0;
         const lunchMinutesToday = hasLunchToday ? lunchDurationMinutes : 0;
@@ -356,7 +340,6 @@ export async function processBiometricPunches(
     }
   }
 
-  // Persistencia con deduplicación en UnmatchedBiometricLog
   if (options.saveUnmatched !== false && unmatchedToSave.length > 0) {
     const existingUnmatched = await prisma.unmatchedBiometricLog.findMany({
       where: {
