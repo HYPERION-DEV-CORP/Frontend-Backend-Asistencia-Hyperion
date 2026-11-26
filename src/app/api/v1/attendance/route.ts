@@ -1,15 +1,41 @@
-// src/app/api/v1/attendance/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { calculateDistanceInMeters } from '@/lib/geo';
 import { calculateLunchExcessMinutes } from '@/lib/sst-monitor';
 import { assertPeriodIsOpen } from '@/lib/payroll-period';
 
-// Helper para convertir "HH:mm" a [hora, minuto]
-function parseTimeHHMM(timeStr: string | null | undefined, fallbackH: number, fallbackM: number): [number, number] {
+function parseTimeHHMM(
+  timeStr: string | null | undefined,
+  fallbackH: number,
+  fallbackM: number
+): [number, number] {
   if (!timeStr || !timeStr.includes(':')) return [fallbackH, fallbackM];
   const [h, m] = timeStr.split(':').map(Number);
   return [isNaN(h) ? fallbackH : h, isNaN(m) ? fallbackM : m];
+}
+
+function toTotalMinutes(timeStr: string | null | undefined, fallbackMinutes: number): number {
+  if (!timeStr || !timeStr.includes(':')) return fallbackMinutes;
+  const [h, m] = timeStr.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return fallbackMinutes;
+  return h * 60 + m;
+}
+
+function getPeruParts(date: Date) {
+  const peruDate = new Date(date.getTime() - 5 * 60 * 60 * 1000);
+  const dayKey = peruDate.toISOString().slice(0, 10);
+  const dayDate = new Date(`${dayKey}T00:00:00.000Z`);
+  const dayOfWeek = peruDate.getUTCDay(); // 0=Dom ... 6=Sáb
+  const hour = peruDate.getUTCHours();
+  const minute = peruDate.getUTCMinutes();
+  const totalMinutes = hour * 60 + minute;
+  return { dayKey, dayDate, dayOfWeek, hour, minute, totalMinutes };
+}
+
+function buildPeruDateTime(dayKey: string, hour: number, minute: number): Date {
+  const hh = String(hour).padStart(2, '0');
+  const mm = String(minute).padStart(2, '0');
+  return new Date(`${dayKey}T${hh}:${mm}:00.000-05:00`);
 }
 
 export async function POST(req: NextRequest) {
@@ -28,8 +54,7 @@ export async function POST(req: NextRequest) {
     }
 
     const serverTimestamp = new Date();
-    const today = new Date(serverTimestamp);
-    today.setHours(0, 0, 0, 0);
+    const { dayKey, dayDate: today, dayOfWeek, totalMinutes } = getPeruParts(serverTimestamp);
 
     // 1. BUSCAR TRABAJADOR Y CONFIGURACIÓN DINÁMICA DE SU EMPRESA
     const user = await prisma.user.findFirst({
@@ -45,9 +70,13 @@ export async function POST(req: NextRequest) {
     }
 
     const company = user.company;
+    const checkInStartStr = company.biometricCheckInStart || '06:00';
+    const checkInEndStr = company.biometricCheckInEnd || '11:59';
     const lunchWindowStartStr = company.lunchWindowStart || '13:00';
     const lunchWindowEndStr = company.lunchWindowEnd || '13:30';
+    const lunchReturnEndStr = company.lunchReturnEnd || '16:59';
     const lunchDurationMinutes = company.lunchDurationMinutes ?? 60;
+    const checkOutStartStr = company.biometricCheckOutStart || '17:00';
     const lunchDays = Array.isArray(company.lunchDays) ? company.lunchDays : [1, 2, 3, 4, 5];
     const saturdayWorkHours = company.saturdayWorkHours ?? 4.5;
 
@@ -98,18 +127,9 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const startOfMonth = new Date(
-        serverTimestamp.getFullYear(),
-        serverTimestamp.getMonth(),
-        1
-      );
+      const startOfMonth = new Date(`${dayKey.slice(0, 7)}-01T00:00:00.000Z`);
       const endOfMonth = new Date(
-        serverTimestamp.getFullYear(),
-        serverTimestamp.getMonth() + 1,
-        0,
-        23,
-        59,
-        59
+        Date.UTC(Number(dayKey.slice(0, 4)), Number(dayKey.slice(5, 7)), 0, 23, 59, 59)
       );
 
       const homeOfficeCount = await prisma.attendanceRecord.count({
@@ -164,11 +184,22 @@ export async function POST(req: NextRequest) {
 
     const currentAction = actionType || 'CHECK_IN';
 
-    // A) REGISTRO DE INGRESO (CHECK_IN)
+    // A) REGISTRO DE INGRESO (CHECK_IN) - FRANJA DINÁMICA
     if (currentAction === 'CHECK_IN') {
       if (record) {
         return NextResponse.json(
           { error: 'Ya registró su entrada el día de hoy.' },
+          { status: 400 }
+        );
+      }
+
+      const checkInStartMin = toTotalMinutes(checkInStartStr, 6 * 60);
+      const checkInEndMin = toTotalMinutes(checkInEndStr, 11 * 60 + 59);
+      if (totalMinutes < checkInStartMin || totalMinutes > checkInEndMin) {
+        return NextResponse.json(
+          {
+            error: `La marcación de entrada solo está habilitada entre ${checkInStartStr} y ${checkInEndStr}.`,
+          },
           { status: 400 }
         );
       }
@@ -193,21 +224,19 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const [workHour, workMin] = user.workStartTime.split(':').map(Number);
-      const graceLimitTime = new Date(serverTimestamp);
-      graceLimitTime.setHours(workHour, workMin + user.toleranceMinutes, 0, 0);
+      const [workHour, workMin] = parseTimeHHMM(user.workStartTime, 9, 0);
+      const expectedTime = buildPeruDateTime(dayKey, workHour, workMin);
+      const graceLimitTime = new Date(
+        expectedTime.getTime() + user.toleranceMinutes * 60_000
+      );
 
       let lateMinutes = 0;
       let status: 'PRESENT' | 'LATE' = 'PRESENT';
 
       if (serverTimestamp > graceLimitTime) {
         status = 'LATE';
-        const expectedTime = new Date(serverTimestamp);
-        expectedTime.setHours(workHour, workMin, 0, 0);
-
         const diffMs = serverTimestamp.getTime() - expectedTime.getTime();
         const totalLateMinutes = Math.floor(diffMs / (1000 * 60));
-
         lateMinutes = Math.max(0, totalLateMinutes - user.toleranceMinutes);
       }
 
@@ -253,7 +282,6 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const dayOfWeek = serverTimestamp.getDay(); // 0=Dom ... 6=Sáb
       if (!lunchDays.includes(dayOfWeek)) {
         return NextResponse.json(
           { error: 'El día de hoy no contempla turno de refrigerio según la política de la empresa.' },
@@ -261,16 +289,10 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const [winStartH, winStartM] = parseTimeHHMM(lunchWindowStartStr, 13, 0);
-      const [winEndH, winEndM] = parseTimeHHMM(lunchWindowEndStr, 13, 30);
+      const lunchStartMin = toTotalMinutes(lunchWindowStartStr, 13 * 60);
+      const lunchEndMin = toTotalMinutes(lunchWindowEndStr, 13 * 60 + 30);
 
-      const windowStart = new Date(serverTimestamp);
-      windowStart.setHours(winStartH, winStartM, 0, 0);
-
-      const windowEnd = new Date(serverTimestamp);
-      windowEnd.setHours(winEndH, winEndM, 0, 0);
-
-      if (serverTimestamp < windowStart) {
+      if (totalMinutes < lunchStartMin) {
         return NextResponse.json(
           {
             error: `El horario permitido para iniciar el refrigerio es a partir de las ${lunchWindowStartStr}.`,
@@ -279,7 +301,7 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      if (serverTimestamp > windowEnd) {
+      if (totalMinutes > lunchEndMin) {
         return NextResponse.json(
           {
             error: `Ha superado la hora límite para salir a refrigerio (Máximo ${lunchWindowEndStr}).`,
@@ -302,7 +324,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // C) FIN DE REFRIGERIO (LUNCH_END) - DURACIÓN DINÁMICA DE EMPRESA
+    // C) FIN DE REFRIGERIO (LUNCH_END) - DURACIÓN Y TOPE DINÁMICO DE EMPRESA
     else if (currentAction === 'LUNCH_END') {
       if (!record || !record.lunchStart) {
         return NextResponse.json(
@@ -313,6 +335,16 @@ export async function POST(req: NextRequest) {
       if (record.lunchEnd) {
         return NextResponse.json(
           { error: 'Ya registró fin de refrigerio el día de hoy.' },
+          { status: 400 }
+        );
+      }
+
+      const lunchReturnMaxMin = toTotalMinutes(lunchReturnEndStr, 16 * 60 + 59);
+      if (totalMinutes > lunchReturnMaxMin) {
+        return NextResponse.json(
+          {
+            error: `El plazo máximo para marcar fin de refrigerio era hasta las ${lunchReturnEndStr}.`,
+          },
           { status: 400 }
         );
       }
@@ -363,7 +395,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // D) REGISTRO DE SALIDA (CHECK_OUT)
+    // D) REGISTRO DE SALIDA (CHECK_OUT) - FRANJA DINÁMICA DE EMPRESA
     else if (currentAction === 'CHECK_OUT') {
       if (!record || !record.checkIn) {
         return NextResponse.json(
@@ -378,27 +410,48 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const [workHour, workMin] = user.workStartTime.split(':').map(Number);
-      const dayOfWeek = record.date.getDay();
       const isSaturday = dayOfWeek === 6;
+      const checkInEndMin = toTotalMinutes(checkInEndStr, 11 * 60 + 59);
+      const checkOutStartMin = toTotalMinutes(checkOutStartStr, 17 * 60);
+
+      if (isSaturday) {
+        if (totalMinutes <= checkInEndMin) {
+          return NextResponse.json(
+            {
+              error: `La marcación de salida los sábados inicia después de las ${checkInEndStr}.`,
+            },
+            { status: 400 }
+          );
+        }
+      } else {
+        if (totalMinutes < checkOutStartMin) {
+          return NextResponse.json(
+            {
+              error: `La marcación de salida está habilitada a partir de las ${checkOutStartStr}.`,
+            },
+            { status: 400 }
+          );
+        }
+      }
+
+      const [workHour, workMin] = parseTimeHHMM(user.workStartTime, 9, 0);
       const hasLunchToday = lunchDays.includes(dayOfWeek);
       const userHoursPerDay = user.payrollPolicy?.hoursPerDay || 8.0;
 
       const effectiveDayHours = isSaturday ? saturdayWorkHours : userHoursPerDay;
       const lunchMinutesToday = hasLunchToday ? lunchDurationMinutes : 0;
 
-      const officialCheckOut = new Date(record.date);
-      officialCheckOut.setHours(workHour, workMin, 0, 0);
-      officialCheckOut.setMinutes(
-        officialCheckOut.getMinutes() + Math.round(effectiveDayHours * 60) + lunchMinutesToday
+      const expectedStart = buildPeruDateTime(dayKey, workHour, workMin);
+      const officialCheckOut = new Date(
+        expectedStart.getTime() +
+          (Math.round(effectiveDayHours * 60) + lunchMinutesToday) * 60_000
       );
 
       const [winStartH, winStartM] = parseTimeHHMM(lunchWindowStartStr, 13, 0);
-      const defaultLunchStart = new Date(record.date);
-      defaultLunchStart.setHours(winStartH, winStartM, 0, 0);
-
-      const defaultLunchEnd = new Date(defaultLunchStart);
-      defaultLunchEnd.setMinutes(defaultLunchEnd.getMinutes() + lunchDurationMinutes);
+      const defaultLunchStart = buildPeruDateTime(dayKey, winStartH, winStartM);
+      const defaultLunchEnd = new Date(
+        defaultLunchStart.getTime() + lunchDurationMinutes * 60_000
+      );
 
       const shouldAutoAssignLunch =
         hasLunchToday &&
