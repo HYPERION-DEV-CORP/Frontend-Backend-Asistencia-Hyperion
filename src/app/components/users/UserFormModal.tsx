@@ -10,6 +10,7 @@ export interface UserFormData {
   biometricCode?: string | null;
   role?: 'EMPLOYEE' | 'HR' | 'ADMIN';
   isSubjectToSupervision?: boolean;
+  isRemoteAllowed?: boolean;
   name: string;
   lastName: string;
   email: string;
@@ -35,6 +36,7 @@ const DEFAULT_FORM_STATE: UserFormData = {
   biometricCode: '',
   role: 'EMPLOYEE',
   isSubjectToSupervision: true,
+  isRemoteAllowed: false,
   name: '',
   lastName: '',
   email: '',
@@ -63,6 +65,7 @@ export default function UserFormModal({
         biometricCode: userToEdit.biometricCode || '',
         role: userToEdit.role || 'EMPLOYEE',
         isSubjectToSupervision: userToEdit.isSubjectToSupervision ?? true,
+        isRemoteAllowed: userToEdit.isRemoteAllowed ?? false,
         name: userToEdit.name || '',
         lastName: userToEdit.lastName || '',
         email: userToEdit.email || '',
@@ -256,6 +259,28 @@ export default function UserFormModal({
                   {formData.isSubjectToSupervision
                     ? 'Activo: Este trabajador debe marcar asistencia y generará tardanzas o faltas injustificadas automáticamente.'
                     : 'Exonerado (Art. 5): Personal de dirección o no fiscalizado. No genera faltas automáticas si no marca.'}
+                </span>
+              </div>
+            </label>
+
+            {/* Control de Trabajo Remoto Autorizado */}
+            <label className="flex items-start gap-3 p-3.5 rounded-xl border border-slate-300 bg-slate-50 cursor-pointer hover:bg-slate-100 transition">
+              <input
+                type="checkbox"
+                checked={formData.isRemoteAllowed ?? false}
+                onChange={(e) =>
+                  setFormData({ ...formData, isRemoteAllowed: e.target.checked })
+                }
+                className="mt-0.5 w-4 h-4 accent-[#025A81] cursor-pointer"
+              />
+              <div>
+                <span className="text-xs font-extrabold text-slate-900 block">
+                  Autorizar Trabajo Remoto (Marcación fuera de instalaciones)
+                </span>
+                <span className="text-[11px] text-slate-600 block mt-0.5">
+                  {formData.isRemoteAllowed
+                    ? 'Habilitado: Este trabajador puede marcar asistencia desde fuera de las sedes de la empresa bajo modalidad Trabajo Remoto.'
+                    : 'Restringido: Solo podrá marcar asistencia dentro del perímetro GPS de las sedes autorizadas.'}
                 </span>
               </div>
             </label>

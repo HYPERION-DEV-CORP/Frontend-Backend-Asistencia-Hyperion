@@ -10,6 +10,10 @@ import {
   Save,
   ShieldCheck,
   Info,
+  Plus,
+  Trash2,
+  Crosshair,
+  Building2,
 } from 'lucide-react';
 
 interface CompanySettings {
@@ -20,9 +24,16 @@ interface CompanySettings {
   lunchDurationMinutes: number;
   lunchDays: number[];
   saturdayWorkHours: number;
-  officeLat: number;
-  officeLng: number;
+}
+
+interface AuthorizedLocationItem {
+  id: string;
+  name: string;
+  address?: string | null;
+  latitude: number;
+  longitude: number;
   radiusM: number;
+  isActive: boolean;
 }
 
 const WEEK_DAYS = [
@@ -44,9 +55,6 @@ export default function CompanySettingsPage() {
     lunchDurationMinutes: 60,
     lunchDays: [1, 2, 3, 4, 5],
     saturdayWorkHours: 4.5,
-    officeLat: -14.078775,
-    officeLng: -75.751176,
-    radiusM: 50,
   });
 
   const [loading, setLoading] = useState(true);
@@ -58,7 +66,15 @@ export default function CompanySettingsPage() {
       .then((res) => res.json())
       .then((data) => {
         if (data.success && data.settings) {
-          setSettings(data.settings);
+          setSettings({
+            name: data.settings.name,
+            ruc: data.settings.ruc,
+            lunchWindowStart: data.settings.lunchWindowStart,
+            lunchWindowEnd: data.settings.lunchWindowEnd,
+            lunchDurationMinutes: data.settings.lunchDurationMinutes,
+            lunchDays: data.settings.lunchDays,
+            saturdayWorkHours: data.settings.saturdayWorkHours,
+          });
         }
       })
       .catch(() => null)
@@ -77,7 +93,6 @@ export default function CompanySettingsPage() {
     });
   };
 
-  // Calcula un ejemplo dinámico de retorno si sale justo al abrir la ventana
   const computeExampleReturn = () => {
     if (!settings.lunchWindowStart) return '--:--';
     const [h, m] = settings.lunchWindowStart.split(':').map(Number);
@@ -120,306 +135,483 @@ export default function CompanySettingsPage() {
   }
 
   return (
-    <form onSubmit={handleSave} className="space-y-6 max-w-6xl">
-      {/* CABECERA */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
-        <div>
-          <h1 className="text-xl font-bold text-white flex items-center gap-2">
-            <ShieldCheck className="w-6 h-6 text-[#00BFA5]" />
-            Configuración Operativa de Refrigerio y Jornadas
-          </h1>
-          <p className="text-xs text-slate-400 mt-1">
-            {settings.name} | RUC: {settings.ruc} — Los cambios aplican inmediatamente en la App Móvil y en el cálculo de Planilla.
-          </p>
-        </div>
-
-        <button
-          type="submit"
-          disabled={saving}
-          className="flex items-center gap-2 bg-[#00BFA5] hover:bg-[#00a892] text-slate-950 text-xs font-extrabold px-5 py-2.5 rounded-lg shadow-lg transition cursor-pointer disabled:opacity-60"
-        >
-          <Save className="w-4 h-4" />
-          {saving ? 'Guardando cambios...' : 'Guardar Toda la Configuración'}
-        </button>
-      </div>
-
-      {feedback && (
-        <div
-          className={`p-3.5 rounded-xl border text-xs font-semibold ${
-            feedback.type === 'ok'
-              ? 'bg-emerald-950/60 border-emerald-700/50 text-emerald-300'
-              : 'bg-rose-950/60 border-rose-700/50 text-rose-300'
-          }`}
-        >
-          {feedback.type === 'ok' ? '✅ ' : '⚠️ '}
-          {feedback.text}
-        </div>
-      )}
-
-      {/* GRILLA DE TARJETAS CONFIGURABLES */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* TARJETA 1: VENTANA DE INICIO DE REFRIGERIO */}
-        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+    <div className="space-y-6 max-w-6xl">
+      <form onSubmit={handleSave} className="space-y-6">
+        {/* CABECERA */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
           <div>
-            <div className="flex items-center gap-2.5 text-white font-bold text-sm">
-              <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                <Utensils className="w-5 h-5" />
-              </div>
-              1. Ventana Permitida para Iniciar Refrigerio
-            </div>
-            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-              Define el rango horario en el que los trabajadores pueden pulsar{' '}
-              <strong className="text-slate-200">Inicio Refrigerio</strong> en la aplicación móvil.
-              Fuera de este rango el sistema bloqueará la marcación y enviará un recordatorio 5 minutos antes del cierre.
+            <h1 className="text-xl font-bold text-white flex items-center gap-2">
+              <ShieldCheck className="w-6 h-6 text-[#00BFA5]" />
+              Configuración Operativa de Refrigerio, Jornadas y Sedes
+            </h1>
+            <p className="text-xs text-slate-400 mt-1">
+              {settings.name} | RUC: {settings.ruc} — Los cambios aplican inmediatamente en la App Móvil y en el cálculo de Planilla.
             </p>
-
-            <div className="grid grid-cols-2 gap-4 mt-5">
-              <div>
-                <label className="text-xs font-bold text-slate-300 block mb-1.5">
-                  Hora de Apertura (Inicio)
-                </label>
-                <input
-                  type="time"
-                  required
-                  value={settings.lunchWindowStart}
-                  onChange={(e) =>
-                    setSettings({ ...settings, lunchWindowStart: e.target.value })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
-                />
-                <span className="text-[11px] text-slate-500 mt-1 block">
-                  Dispara la 1ra notificación push.
-                </span>
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-slate-300 block mb-1.5">
-                  Hora Límite de Salida (Cierre)
-                </label>
-                <input
-                  type="time"
-                  required
-                  value={settings.lunchWindowEnd}
-                  onChange={(e) =>
-                    setSettings({ ...settings, lunchWindowEnd: e.target.value })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
-                />
-                <span className="text-[11px] text-slate-500 mt-1 block">
-                  Avisa 5 min antes si aún no marca.
-                </span>
-              </div>
-            </div>
           </div>
 
-          <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 flex items-center gap-2">
-            <Info className="w-4 h-4 text-[#00BFA5] shrink-0" />
-            <span>
-              Los empleados podrán iniciar su refrigerio únicamente entre las{' '}
-              <strong className="text-white">{settings.lunchWindowStart}</strong> y las{' '}
-              <strong className="text-white">{settings.lunchWindowEnd}</strong>.
-            </span>
-          </div>
+          <button
+            type="submit"
+            disabled={saving}
+            className="flex items-center gap-2 bg-[#00BFA5] hover:bg-[#00a892] text-slate-950 text-xs font-extrabold px-5 py-2.5 rounded-lg shadow-lg transition cursor-pointer disabled:opacity-60"
+          >
+            <Save className="w-4 h-4" />
+            {saving ? 'Guardando cambios...' : 'Guardar Horarios y Jornadas'}
+          </button>
         </div>
 
-        {/* TARJETA 2: DURACIÓN Y CONTEO DE MINUTOS */}
-        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
-          <div>
-            <div className="flex items-center gap-2.5 text-white font-bold text-sm">
-              <div className="p-2 rounded-lg bg-[#00BFA5]/10 text-[#00BFA5] border border-[#00BFA5]/20">
-                <Clock className="w-5 h-5" />
-              </div>
-              2. Duración Obligatoria del Refrigerio (Conteo)
-            </div>
-            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-              Establece cuántos minutos exactos se cuentan desde que el trabajador marca su{' '}
-              <strong className="text-slate-200">Inicio de Refrigerio</strong>. La app notificará 10
-              minutos antes de culminar y al cumplirse el tiempo total. Si excede este tiempo, los
-              minutos extra se suman automáticamente como tardanza.
-            </p>
+        {feedback && (
+          <div
+            className={`p-3.5 rounded-xl border text-xs font-semibold ${
+              feedback.type === 'ok'
+                ? 'bg-emerald-950/60 border-emerald-700/50 text-emerald-300'
+                : 'bg-rose-950/60 border-rose-700/50 text-rose-300'
+            }`}
+          >
+            {feedback.type === 'ok' ? '✅ ' : '⚠️ '}
+            {feedback.text}
+          </div>
+        )}
 
-            <div className="mt-5">
-              <label className="text-xs font-bold text-slate-300 block mb-1.5">
-                Minutos Permitidos de Refrigerio (Mínimo legal: 45 min)
-              </label>
-              <div className="flex items-center gap-3">
-                <input
-                  type="number"
-                  min={45}
-                  max={180}
-                  required
-                  value={settings.lunchDurationMinutes}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      lunchDurationMinutes: Number(e.target.value),
-                    })
-                  }
-                  className="w-36 bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
-                />
-                <div className="flex gap-1.5">
-                  {[45, 60, 90].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() =>
-                        setSettings({ ...settings, lunchDurationMinutes: preset })
-                      }
-                      className={`px-3 py-2 rounded-lg text-xs font-bold border transition cursor-pointer ${
-                        settings.lunchDurationMinutes === preset
-                          ? 'bg-[#00BFA5] text-slate-950 border-[#00BFA5]'
-                          : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
-                      }`}
-                    >
-                      {preset} min
-                    </button>
-                  ))}
+        {/* GRILLA DE TARJETAS CONFIGURABLES */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* TARJETA 1: VENTANA DE INICIO DE REFRIGERIO */}
+          <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+            <div>
+              <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                  <Utensils className="w-5 h-5" />
+                </div>
+                1. Ventana Permitida para Iniciar Refrigerio
+              </div>
+              <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                Define el rango horario en el que los trabajadores pueden pulsar{' '}
+                <strong className="text-slate-200">Inicio Refrigerio</strong> en la aplicación móvil.
+                Fuera de este rango el sistema bloqueará la marcación y enviará un recordatorio 5 minutos antes del cierre.
+              </p>
+
+              <div className="grid grid-cols-2 gap-4 mt-5">
+                <div>
+                  <label className="text-xs font-bold text-slate-300 block mb-1.5">
+                    Hora de Apertura (Inicio)
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={settings.lunchWindowStart}
+                    onChange={(e) =>
+                      setSettings({ ...settings, lunchWindowStart: e.target.value })
+                    }
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+                  />
+                  <span className="text-[11px] text-slate-500 mt-1 block">
+                    Dispara la 1ra notificación push.
+                  </span>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-300 block mb-1.5">
+                    Hora Límite de Salida (Cierre)
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={settings.lunchWindowEnd}
+                    onChange={(e) =>
+                      setSettings({ ...settings, lunchWindowEnd: e.target.value })
+                    }
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+                  />
+                  <span className="text-[11px] text-slate-500 mt-1 block">
+                    Avisa 5 min antes si aún no marca.
+                  </span>
                 </div>
               </div>
             </div>
-          </div>
 
-          <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 flex items-center gap-2">
-            <Info className="w-4 h-4 text-[#00BFA5] shrink-0" />
-            <span>
-              Ejemplo: Si inicia a las <strong className="text-white">{settings.lunchWindowStart}</strong>,
-              su retorno obligatorio será a las{' '}
-              <strong className="text-[#00BFA5]">{computeExampleReturn()}</strong> (
-              {settings.lunchDurationMinutes} min después).
-            </span>
-          </div>
-        </div>
-
-        {/* TARJETA 3: DÍAS CON REFRIGERIO Y JORNADA DE SÁBADOS */}
-        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
-          <div>
-            <div className="flex items-center gap-2.5 text-white font-bold text-sm">
-              <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                <CalendarDays className="w-5 h-5" />
-              </div>
-              3. Días con Refrigerio y Jornada de Sábados
-            </div>
-            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-              Selecciona qué días de la semana incluyen turno de refrigerio. Los días no marcados
-              (como sábados de jornada corta) permiten marcar salida directa sin exigir refrigerio y
-              calculan el descuento de faltas según las horas configuradas.
-            </p>
-
-            <div className="mt-4">
-              <label className="text-xs font-bold text-slate-300 block mb-2">
-                Días habilitados para marcar Refrigerio
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {WEEK_DAYS.map((day) => {
-                  const active = settings.lunchDays.includes(day.id);
-                  return (
-                    <button
-                      key={day.id}
-                      type="button"
-                      onClick={() => toggleLunchDay(day.id)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
-                        active
-                          ? 'bg-indigo-600 text-white border-indigo-500'
-                          : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'
-                      }`}
-                    >
-                      {day.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <label className="text-xs font-bold text-slate-300 block mb-1.5">
-                Horas Laborales del Sábado (Para cálculo de Planilla y Horas Extras)
-              </label>
-              <input
-                type="number"
-                step="0.5"
-                min={0}
-                max={8}
-                value={settings.saturdayWorkHours}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    saturdayWorkHours: Number(e.target.value),
-                  })
-                }
-                className="w-36 bg-slate-900 border border-slate-700 rounded-xl p-2 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
-              />
-              <span className="text-[11px] text-slate-500 ml-2">
-                horas (ej. 4.5h para turno 09:00 a 13:30)
+            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 flex items-center gap-2">
+              <Info className="w-4 h-4 text-[#00BFA5] shrink-0" />
+              <span>
+                Los empleados podrán iniciar su refrigerio únicamente entre las{' '}
+                <strong className="text-white">{settings.lunchWindowStart}</strong> y las{' '}
+                <strong className="text-white">{settings.lunchWindowEnd}</strong>.
               </span>
             </div>
           </div>
+
+          {/* TARJETA 2: DURACIÓN Y CONTEO DE MINUTOS */}
+          <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+            <div>
+              <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+                <div className="p-2 rounded-lg bg-[#00BFA5]/10 text-[#00BFA5] border border-[#00BFA5]/20">
+                  <Clock className="w-5 h-5" />
+                </div>
+                2. Duración Obligatoria del Refrigerio (Conteo)
+              </div>
+              <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                Establece cuántos minutos exactos se cuentan desde que el trabajador marca su{' '}
+                <strong className="text-slate-200">Inicio de Refrigerio</strong>. La app notificará 10
+                minutos antes de culminar y al cumplirse el tiempo total. Si excede este tiempo, los
+                minutos extra se suman automáticamente como tardanza.
+              </p>
+
+              <div className="mt-5">
+                <label className="text-xs font-bold text-slate-300 block mb-1.5">
+                  Minutos Permitidos de Refrigerio (Mínimo legal: 45 min)
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="number"
+                    min={45}
+                    max={180}
+                    required
+                    value={settings.lunchDurationMinutes}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        lunchDurationMinutes: Number(e.target.value),
+                      })
+                    }
+                    className="w-36 bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+                  />
+                  <div className="flex gap-1.5">
+                    {[45, 60, 90].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() =>
+                          setSettings({ ...settings, lunchDurationMinutes: preset })
+                        }
+                        className={`px-3 py-2 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                          settings.lunchDurationMinutes === preset
+                            ? 'bg-[#00BFA5] text-slate-950 border-[#00BFA5]'
+                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                        }`}
+                      >
+                        {preset} min
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 flex items-center gap-2">
+              <Info className="w-4 h-4 text-[#00BFA5] shrink-0" />
+              <span>
+                Ejemplo: Si inicia a las <strong className="text-white">{settings.lunchWindowStart}</strong>,
+                su retorno obligatorio será a las{' '}
+                <strong className="text-[#00BFA5]">{computeExampleReturn()}</strong> (
+                {settings.lunchDurationMinutes} min después).
+              </span>
+            </div>
+          </div>
+
+          {/* TARJETA 3: DÍAS CON REFRIGERIO Y JORNADA DE SÁBADOS */}
+          <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+            <div>
+              <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+                <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                  <CalendarDays className="w-5 h-5" />
+                </div>
+                3. Días con Refrigerio y Jornada de Sábados
+              </div>
+              <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                Selecciona qué días de la semana incluyen turno de refrigerio. Los días no marcados
+                (como sábados de jornada corta) permiten marcar salida directa sin exigir refrigerio y
+                calculan el descuento de faltas según las horas configuradas.
+              </p>
+
+              <div className="mt-4">
+                <label className="text-xs font-bold text-slate-300 block mb-2">
+                  Días habilitados para marcar Refrigerio
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {WEEK_DAYS.map((day) => {
+                    const active = settings.lunchDays.includes(day.id);
+                    return (
+                      <button
+                        key={day.id}
+                        type="button"
+                        onClick={() => toggleLunchDay(day.id)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                          active
+                            ? 'bg-indigo-600 text-white border-indigo-500'
+                            : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'
+                        }`}
+                      >
+                        {day.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <label className="text-xs font-bold text-slate-300 block mb-1.5">
+                  Horas Laborales del Sábado (Para cálculo de Planilla y Horas Extras)
+                </label>
+                <input
+                  type="number"
+                  step="0.5"
+                  min={0}
+                  max={8}
+                  value={settings.saturdayWorkHours}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      saturdayWorkHours: Number(e.target.value),
+                    })
+                  }
+                  className="w-36 bg-slate-900 border border-slate-700 rounded-xl p-2 text-sm font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
+                />
+                <span className="text-[11px] text-slate-500 ml-2">
+                  horas (ej. 4.5h para turno 09:00 a 13:30)
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* TARJETA 4: PUNTOS DE MARCACIÓN AUTORIZADOS (MULTI-SEDE) */}
+          <AuthorizedLocationsCard />
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function AuthorizedLocationsCard() {
+  const [locations, setLocations] = useState<AuthorizedLocationItem[]>([]);
+  const [loadingLocs, setLoadingLocs] = useState(true);
+  const [name, setName] = useState('');
+  const [address, setAddress] = useState('');
+  const [latitude, setLatitude] = useState('');
+  const [longitude, setLongitude] = useState('');
+  const [radiusM, setRadiusM] = useState(50);
+  const [adding, setAdding] = useState(false);
+  const [locMsg, setLocMsg] = useState<string | null>(null);
+
+  const loadLocations = async () => {
+    try {
+      const res = await fetch('/api/v1/admin/locations');
+      const data = await res.json();
+      if (data.success) setLocations(data.locations);
+    } finally {
+      setLoadingLocs(false);
+    }
+  };
+
+  useEffect(() => {
+    loadLocations();
+  }, []);
+
+  const handleUseCurrentGps = () => {
+    if (!navigator.geolocation) {
+      setLocMsg('Tu navegador no soporta geolocalización.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLatitude(pos.coords.latitude.toFixed(6));
+        setLongitude(pos.coords.longitude.toFixed(6));
+        setLocMsg('Coordenadas GPS actuales capturadas.');
+      },
+      () =>
+        setLocMsg(
+          'No se pudo obtener la ubicación GPS. Verifica los permisos de ubicación del navegador.'
+        ),
+      { enableHighAccuracy: true }
+    );
+  };
+
+  const handleAddLocation = async () => {
+    if (!name.trim() || !latitude || !longitude) {
+      setLocMsg('Completa el nombre, latitud y longitud de la sede.');
+      return;
+    }
+    setAdding(true);
+    setLocMsg(null);
+    try {
+      const res = await fetch('/api/v1/admin/locations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          address,
+          latitude: Number(latitude),
+          longitude: Number(longitude),
+          radiusM: Number(radiusM) || 50,
+          isActive: true,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setName('');
+        setAddress('');
+        setLatitude('');
+        setLongitude('');
+        setRadiusM(50);
+        await loadLocations();
+      } else {
+        setLocMsg(data.error || 'Error al agregar sede.');
+      }
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleToggleActive = async (loc: AuthorizedLocationItem) => {
+    await fetch('/api/v1/admin/locations', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: loc.id, isActive: !loc.isActive }),
+    });
+    await loadLocations();
+  };
+
+  const handleDelete = async (id: string) => {
+    await fetch(`/api/v1/admin/locations?id=${id}`, { method: 'DELETE' });
+    await loadLocations();
+  };
+
+  return (
+    <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
+      <div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+            <div className="p-2 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20">
+              <MapPin className="w-5 h-5" />
+            </div>
+            4. Puntos Autorizados de Marcación (Sedes)
+          </div>
+          <button
+            type="button"
+            onClick={handleUseCurrentGps}
+            className="flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-[#00BFA5] border border-slate-700 transition cursor-pointer"
+          >
+            <Crosshair className="w-3.5 h-3.5" />
+            Capturar GPS actual
+          </button>
         </div>
 
-        {/* TARJETA 4: GEOCERCA Y SEDE PRINCIPAL */}
-        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5">
-          <div>
-            <div className="flex items-center gap-2.5 text-white font-bold text-sm">
-              <div className="p-2 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                <MapPin className="w-5 h-5" />
-              </div>
-              4. Perímetro GPS de Oficina Principal (Geocerca)
-            </div>
-            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-              Coordenadas centrales y radio máximo permitido (en metros) para validar marcaciones
-              presenciales mediante QR, NFC, Huella o Reconocimiento Facial.
-            </p>
+        <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+          Solo los trabajadores dentro del perímetro de una sede activa podrán marcar presencialmente.
+          Fuera de estos puntos únicamente marcarán quienes tengan{' '}
+          <strong className="text-slate-200">Trabajo Remoto</strong> habilitado en su perfil.
+        </p>
 
-            <div className="grid grid-cols-3 gap-3 mt-5">
-              <div>
-                <label className="text-xs font-bold text-slate-300 block mb-1.5">Latitud</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={settings.officeLat}
-                  onChange={(e) =>
-                    setSettings({ ...settings, officeLat: Number(e.target.value) })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-slate-300 block mb-1.5">Longitud</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={settings.officeLng}
-                  onChange={(e) =>
-                    setSettings({ ...settings, officeLng: Number(e.target.value) })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-slate-300 block mb-1.5">Radio (m)</label>
-                <input
-                  type="number"
-                  min={10}
-                  max={1000}
-                  value={settings.radiusM}
-                  onChange={(e) =>
-                    setSettings({ ...settings, radiusM: Number(e.target.value) })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs font-mono font-bold text-white focus:border-[#00BFA5] outline-none"
-                />
-              </div>
+        {/* FORMULARIO RÁPIDO NUEVA SEDE (Guardado independiente vía API) */}
+        <div className="mt-4 p-3.5 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <input
+              type="text"
+              placeholder="Nombre (Ej: Sede Central Ica)"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-[#00BFA5] outline-none"
+            />
+            <input
+              type="text"
+              placeholder="Dirección referencial (opcional)"
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-[#00BFA5] outline-none"
+            />
+          </div>
+
+          <div className="grid grid-cols-3 gap-2.5">
+            <input
+              type="number"
+              step="any"
+              placeholder="Latitud (-14.07...)"
+              value={latitude}
+              onChange={(e) => setLatitude(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
+            />
+            <input
+              type="number"
+              step="any"
+              placeholder="Longitud (-75.75...)"
+              value={longitude}
+              onChange={(e) => setLongitude(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
+            />
+            <div className="flex gap-1.5">
+              <input
+                type="number"
+                min={10}
+                max={2000}
+                placeholder="Radio (m)"
+                value={radiusM}
+                onChange={(e) => setRadiusM(Number(e.target.value))}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleAddLocation}
+                disabled={adding}
+                className="px-3 py-2 rounded-lg bg-[#00BFA5] hover:bg-[#00a892] text-slate-950 font-extrabold text-xs flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-50"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Agregar
+              </button>
             </div>
           </div>
 
-          <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 flex items-center gap-2">
-            <Info className="w-4 h-4 text-[#00BFA5] shrink-0" />
-            <span>
-              Cualquier marcación presencial fuera de{' '}
-              <strong className="text-white">{settings.radiusM} metros</strong> será rechazada
-              automáticamente por seguridad.
-            </span>
-          </div>
+          {locMsg && <p className="text-[11px] text-amber-300">{locMsg}</p>}
+        </div>
+
+        {/* LISTADO DE SEDES */}
+        <div className="mt-4 space-y-2 max-h-52 overflow-y-auto pr-1">
+          {loadingLocs ? (
+            <p className="text-xs text-slate-500">Cargando sedes...</p>
+          ) : (
+            locations.map((loc) => (
+              <div
+                key={loc.id}
+                className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-slate-900 border border-slate-800"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Building2 className="w-3.5 h-3.5 text-[#00BFA5] shrink-0" />
+                    <span className="text-xs font-bold text-white truncate">{loc.name}</span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                      {loc.radiusM}m
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-slate-400 mt-0.5 truncate">
+                    {loc.latitude.toFixed(6)}, {loc.longitude.toFixed(6)}
+                    {loc.address ? ` • ${loc.address}` : ''}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleActive(loc)}
+                    className={`px-2 py-1 rounded-md text-[10px] font-bold border cursor-pointer ${
+                      loc.isActive
+                        ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/50'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {loc.isActive ? 'Activa' : 'Inactiva'}
+                  </button>
+                  {locations.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(loc.id)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition cursor-pointer"
+                      title="Eliminar sede"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
-    </form>
+    </div>
   );
 }

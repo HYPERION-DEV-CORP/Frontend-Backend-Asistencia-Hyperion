@@ -1,3 +1,4 @@
+// src/app/api/v1/attendance/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { calculateDistanceInMeters } from '@/lib/geo';
@@ -56,10 +57,18 @@ export async function POST(req: NextRequest) {
     const serverTimestamp = new Date();
     const { dayKey, dayDate: today, dayOfWeek, totalMinutes } = getPeruParts(serverTimestamp);
 
-    // 1. BUSCAR TRABAJADOR Y CONFIGURACIÓN DINÁMICA DE SU EMPRESA
+    // 1. BUSCAR TRABAJADOR, SEDES ACTIVAS Y CONFIGURACIÓN DINÁMICA DE SU EMPRESA
     const user = await prisma.user.findFirst({
       where: { OR: [{ id: userId }, { dni: userId }] },
-      include: { company: true, homeAddresses: true, payrollPolicy: true },
+      include: {
+        company: {
+          include: {
+            authorizedLocations: { where: { isActive: true } },
+          },
+        },
+        homeAddresses: true,
+        payrollPolicy: true,
+      },
     });
 
     if (!user) {
@@ -84,9 +93,11 @@ export async function POST(req: NextRequest) {
     await assertPeriodIsOpen(today, user.companyId);
 
     // ---------------------------------------------------------
-    // 2. VALIDACIÓN DE GEOCERCAS (OFICINA VS. HOME OFFICE)
+    // 2. VALIDACIÓN DE GEOCERCAS MULTI-SEDE Y TRABAJO REMOTO
     // ---------------------------------------------------------
     let homeOfficeRemaining = 0;
+    let matchedLocationId: string | null = null;
+    let matchedLocationName: string | null = null;
 
     if (type === 'PRESENTIAL_QR') {
       if (!qrContent || qrContent !== company.qrSecret) {
@@ -105,25 +116,56 @@ export async function POST(req: NextRequest) {
         'FACIAL_RECOGNITION',
       ].includes(type)
     ) {
-      const distance = calculateDistanceInMeters(
-        latitude,
-        longitude,
-        company.officeLat,
-        company.officeLng
-      );
-      if (distance > company.radiusM) {
+      const activeLocations =
+        company.authorizedLocations && company.authorizedLocations.length > 0
+          ? company.authorizedLocations
+          : [
+              {
+                id: null,
+                name: 'Sede Principal',
+                latitude: company.officeLat,
+                longitude: company.officeLng,
+                radiusM: company.radiusM,
+              },
+            ];
+
+      let closestDistance = Infinity;
+      let closestLocation = activeLocations[0];
+
+      for (const loc of activeLocations) {
+        const dist = calculateDistanceInMeters(
+          latitude,
+          longitude,
+          loc.latitude,
+          loc.longitude
+        );
+        if (dist < closestDistance) {
+          closestDistance = dist;
+          closestLocation = loc;
+        }
+        if (dist <= loc.radiusM) {
+          matchedLocationId = loc.id;
+          matchedLocationName = loc.name;
+          break;
+        }
+      }
+
+      if (!matchedLocationName) {
         return NextResponse.json(
           {
-            error: `Fuera del rango de la oficina: ${Math.round(distance)}m (Límite: ${company.radiusM}m)`,
+            error: `Fuera de las instalaciones autorizadas. Sede más cercana: "${closestLocation.name}" a ${Math.round(closestDistance)}m (Límite: ${closestLocation.radiusM}m).`,
           },
           { status: 403 }
         );
       }
     } else if (type === 'HOME_OFFICE') {
-      if (user.homeAddresses.length === 0) {
+      if (!user.isRemoteAllowed) {
         return NextResponse.json(
-          { error: 'No tiene domicilios registrados para Home Office.' },
-          { status: 400 }
+          {
+            error:
+              'Su perfil no está autorizado para realizar trabajo remoto. Debe registrar su asistencia dentro de una sede autorizada.',
+          },
+          { status: 403 }
         );
       }
 
@@ -146,30 +188,32 @@ export async function POST(req: NextRequest) {
       ) {
         return NextResponse.json(
           {
-            error: `Excedió su cuota mensual de Home Office (${user.homeOfficeQuota} días).`,
+            error: `Excedió su cuota mensual de Trabajo Remoto (${user.homeOfficeQuota} días).`,
           },
           { status: 403 }
         );
       }
 
-      const enRango = user.homeAddresses.some((addr) => {
-        const dist = calculateDistanceInMeters(
-          latitude,
-          longitude,
-          addr.latitude,
-          addr.longitude
-        );
-        return dist <= 50.0;
-      });
+      if (user.homeAddresses.length > 0) {
+        const enRango = user.homeAddresses.some((addr) => {
+          const dist = calculateDistanceInMeters(
+            latitude,
+            longitude,
+            addr.latitude,
+            addr.longitude
+          );
+          return dist <= 50.0;
+        });
 
-      if (!enRango) {
-        return NextResponse.json(
-          {
-            error:
-              'No se encuentra en el rango de ninguno de sus domicilios registrados (Límite 50m).',
-          },
-          { status: 403 }
-        );
+        if (!enRango) {
+          return NextResponse.json(
+            {
+              error:
+                'No se encuentra en el rango de ninguno de sus domicilios registrados para Trabajo Remoto (Límite 50m).',
+            },
+            { status: 403 }
+          );
+        }
       }
 
       homeOfficeRemaining = user.homeOfficeQuota - (homeOfficeCount + 1);
@@ -243,6 +287,7 @@ export async function POST(req: NextRequest) {
       record = await prisma.attendanceRecord.create({
         data: {
           userId: user.id,
+          locationId: matchedLocationId,
           date: today,
           checkIn: serverTimestamp,
           type,
@@ -251,6 +296,7 @@ export async function POST(req: NextRequest) {
           latitude,
           longitude,
           employeeSignature: signature || user.signatureBase64 || null,
+          observations: matchedLocationName ? `Sede: ${matchedLocationName}` : null,
         },
       });
 
@@ -260,6 +306,7 @@ export async function POST(req: NextRequest) {
         message: 'Entrada registrada con éxito',
         status: record.status,
         lateMinutes,
+        locationName: matchedLocationName || 'Trabajo Remoto',
         homeOfficeRemaining:
           type === 'HOME_OFFICE' ? homeOfficeRemaining : undefined,
         record,

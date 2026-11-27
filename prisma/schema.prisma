@@ -36,11 +36,11 @@ enum PermissionStatus {
 }
 
 enum PermissionType {
-  MEDICAL_LEAVE       // Descanso Médico (ESSALUD)
-  PERSONAL_PERMIT     // Papeleta de Salida Particular
+  MEDICAL_LEAVE // Descanso Médico (ESSALUD)
+  PERSONAL_PERMIT // Papeleta de Salida Particular
   MATERNITY_PATERNITY // Licencia Maternidad/Paternidad
-  VACATION_LEAVE      // Saldo de Vacaciones
-  COMMISSION          // Comisión de Servicio Externo
+  VACATION_LEAVE // Saldo de Vacaciones
+  COMMISSION // Comisión de Servicio Externo
 }
 
 enum PeriodStatus {
@@ -63,13 +63,13 @@ enum SubscriptionStatus {
 }
 
 model Company {
-  id                 String             @id @default(uuid())
-  name               String             @default("Hyperion Digital Security S.A.C.") // Razón Social exigida por SUNAFIL
-  ruc                String             @unique @default("20608810987")             // RUC de 11 dígitos obligatorio
-  officeLat          Float              @default(-14.078775)
-  officeLng          Float              @default(-75.751176)
-  radiusM            Float              @default(30.0)
-  qrSecret           String             @default("HYPERION_QR_SECRET_KEY_2026")
+  id        String @id @default(uuid())
+  name      String @default("Hyperion Digital Security S.A.C.") // Razón Social exigida por SUNAFIL
+  ruc       String @unique @default("20608810987") // RUC de 11 dígitos obligatorio
+  officeLat Float  @default(-14.078775)
+  officeLng Float  @default(-75.751176)
+  radiusM   Float  @default(30.0)
+  qrSecret  String @default("HYPERION_QR_SECRET_KEY_2026")
 
   // CONTROL DE PRUEBA GRATUITA (7 DÍAS) Y SUSCRIPCIÓN
   planType           SubscriptionPlan   @default(TRIAL)
@@ -80,46 +80,66 @@ model Company {
   // MÓDULOS ACTIVABLES / DESACTIVABLES POR EMPRESA (FEATURE FLAGS)
   // Valores soportados: "ATTENDANCE_QR", "BIOMETRIC_SYNC", "AUTO_ABSENCE_CRON",
   // "DIGITAL_SIGNATURE", "PLAME_EXPORT", "AUDIT_FORENSIC"
-  enabledModules     String[]           @default(["ATTENDANCE_QR", "AUTO_ABSENCE_CRON", "PLAME_EXPORT", "AUDIT_FORENSIC"])
+  enabledModules String[] @default(["ATTENDANCE_QR", "AUTO_ABSENCE_CRON", "PLAME_EXPORT", "AUDIT_FORENSIC"])
 
-  users              User[]
-  payrollPolicies    PayrollPolicy[]
-  payrollPeriods     PayrollPeriod[]
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
-  
+  users               User[]
+  payrollPolicies     PayrollPolicy[]
+  payrollPeriods      PayrollPeriod[]
+  authorizedLocations AuthorizedLocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   // Configuración Dinámica de Refrigerio y Jornada
-  biometricCheckInStart  String  @default("06:00") // Desde qué hora una marcación cuenta como Entrada
-  biometricCheckInEnd    String  @default("11:59") // Hasta qué hora cuenta como Entrada
-  lunchWindowStart       String  @default("13:00") // Hora inicio permitida para salir a refrigerio
-  lunchWindowEnd         String  @default("13:30") // Hora límite para iniciar refrigerio
-  lunchReturnEnd         String  @default("16:59") // Hora límite para registrar retorno de refrigerio
-  lunchDurationMinutes   Int     @default(60)      // Duración reglamentaria (mínimo 45 min según D.S. N° 007-2002-TR)
-  biometricCheckOutStart String  @default("17:00") // Desde qué hora una marcación cuenta como Salida (L-V)
-  lunchDays              Int[]   @default([1, 2, 3, 4, 5]) // 1=Lun ... 5=Vie (6=Sáb si aplica)
-  saturdayWorkHours      Float   @default(4.5)     // Horas de jornada los sábados (0 si no trabajan sábados)
+  biometricCheckInStart  String @default("06:00") // Desde qué hora una marcación cuenta como Entrada
+  biometricCheckInEnd    String @default("11:59") // Hasta qué hora cuenta como Entrada
+  lunchWindowStart       String @default("13:00") // Hora inicio permitida para salir a refrigerio
+  lunchWindowEnd         String @default("13:30") // Hora límite para iniciar refrigerio
+  lunchReturnEnd         String @default("16:59") // Hora límite para registrar retorno de refrigerio
+  lunchDurationMinutes   Int    @default(60) // Duración reglamentaria (mínimo 45 min según D.S. N° 007-2002-TR)
+  biometricCheckOutStart String @default("17:00") // Desde qué hora una marcación cuenta como Salida (L-V)
+  lunchDays              Int[]  @default([1, 2, 3, 4, 5]) // 1=Lun ... 5=Vie (6=Sáb si aplica)
+  saturdayWorkHours      Float  @default(4.5) // Horas de jornada los sábados (0 si no trabajan sábados)
+}
+
+model AuthorizedLocation {
+  id                String             @id @default(uuid())
+  companyId         String
+  company           Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name              String // Ej: "Sede Principal Ica", "Almacén Operativo"
+  address           String?
+  latitude          Float
+  longitude         Float
+  radiusM           Float              @default(50.0) // Radio permitido en metros
+  isActive          Boolean            @default(true)
+  attendanceRecords AttendanceRecord[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([companyId, isActive])
 }
 
 model User {
-  id                     String   @id @default(uuid())
-  dni                    String   @unique
-  docType                String   @default("DNI")
-  biometricCode          String?  @unique // Código EnNo del reloj biométrico (Ej: "00000004")
+  id                     String  @id @default(uuid())
+  dni                    String  @unique
+  docType                String  @default("DNI")
+  biometricCode          String? @unique // Código EnNo del reloj biométrico (Ej: "00000004")
   name                   String
   lastName               String
-  email                  String   @unique
+  email                  String  @unique
   passwordHash           String
-  role                   Role     @default(EMPLOYEE)
-  isSubjectToSupervision Boolean  @default(true) // true: Marca asistencia y genera faltas | false: Personal de dirección exonerado
+  role                   Role    @default(EMPLOYEE)
+  isSubjectToSupervision Boolean @default(true) // true: Marca asistencia y genera faltas | false: Personal de dirección exonerado
+  isRemoteAllowed        Boolean @default(false) // true: Autorizado a marcar fuera de sedes de la empresa (HOME_OFFICE)
   jobTitle               String
-  isActive               Boolean  @default(true)
-  workStartTime          String   @default("09:00")
-  toleranceMinutes       Int      @default(10)
-  homeOfficeQuota        Int      @default(4)
-  baseSalary             Float    @default(0.0)
-  discountRate           Float    @default(0.0)
-  pensionSystem          String   @default("AFP") // "AFP" | "ONP" | "NONE"
-  pensionRate            Float    @default(13.0)  // Porcentaje previsional (13% por defecto)
+  isActive               Boolean @default(true)
+  workStartTime          String  @default("09:00")
+  toleranceMinutes       Int     @default(10)
+  homeOfficeQuota        Int     @default(4)
+  baseSalary             Float   @default(0.0)
+  discountRate           Float   @default(0.0)
+  pensionSystem          String  @default("AFP") // "AFP" | "ONP" | "NONE"
+  pensionRate            Float   @default(13.0) // Porcentaje previsional (13% por defecto)
 
   companyId String
   company   Company @relation(fields: [companyId], references: [id])
@@ -128,8 +148,8 @@ model User {
   payrollPolicy   PayrollPolicy? @relation(fields: [payrollPolicyId], references: [id])
 
   signatureBase64     String?   @db.Text // Firma configurada en el perfil de la app móvil (marcación diaria)
-  resetToken          String?   @unique  // Token/código OTP para recuperar contraseña
-  resetTokenExpiresAt DateTime?          // Expiración del código (ej. 15 minutos)
+  resetToken          String?   @unique // Token/código OTP para recuperar contraseña
+  resetTokenExpiresAt DateTime? // Expiración del código (ej. 15 minutos)
 
   homeAddresses       HomeAddress[]
   attendanceRecords   AttendanceRecord[]
@@ -138,19 +158,19 @@ model User {
   digitalPaystubs     DigitalPaystub[]
   closedPeriods       PayrollPeriod[]            @relation("ClosedPeriods")
   rectificationAudits AttendanceAuditLog[]       @relation("AdminRectifications")
-  monthlySignOffs     MonthlyAttendanceSignOff[] // <--- RELACIÓN INVERSA AGREGADA
+  monthlySignOffs     MonthlyAttendanceSignOff[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
 model HomeAddress {
-  id        String   @id @default(uuid())
-  alias     String   @default("Casa Principal")
+  id        String  @id @default(uuid())
+  alias     String  @default("Casa Principal")
   latitude  Float
   longitude Float
   address   String?
-  isPrimary Boolean  @default(true)
+  isPrimary Boolean @default(true)
 
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -158,82 +178,85 @@ model HomeAddress {
 }
 
 model AttendanceRecord {
-  id                   String           @id @default(uuid())
-  userId               String
-  user                 User             @relation(fields: [userId], references: [id])
-  date                 DateTime         @db.Date
-  checkIn              DateTime?
-  lunchStart           DateTime?
-  lunchEnd             DateTime?
-  checkOut             DateTime?
-  type                 AttendanceType   @default(PRESENTIAL_QR)
-  status               AttendanceStatus @default(PRESENT)
+  id         String              @id @default(uuid())
+  userId     String
+  user       User                @relation(fields: [userId], references: [id])
+  locationId String?
+  location   AuthorizedLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  date       DateTime            @db.Date
+  checkIn    DateTime?
+  lunchStart DateTime?
+  lunchEnd   DateTime?
+  checkOut   DateTime?
+  type       AttendanceType      @default(PRESENTIAL_QR)
+  status     AttendanceStatus    @default(PRESENT)
 
-  lateMinutes          Int              @default(0)
+  lateMinutes Int @default(0)
 
   // CUMPLIMIENTO LEY N° 28999: SOBRETASAS DE HORAS EXTRAS (25% Y 35%)
-  overtimeMinutes      Int              @default(0)
-  overtime25Minutes    Int              @default(0)
-  overtime35Minutes    Int              @default(0)
-  isOvertimeApproved   Boolean          @default(false)
-  approvedBy           String?
+  overtimeMinutes    Int     @default(0)
+  overtime25Minutes  Int     @default(0)
+  overtime35Minutes  Int     @default(0)
+  isOvertimeApproved Boolean @default(false)
+  approvedBy         String?
 
   // TRANSPARENCIA LABORAL D.S. N° 004-2006-TR
-  isModifiedByHR       Boolean          @default(false)
-  hrModificationReason String?          @db.Text
+  isModifiedByHR       Boolean @default(false)
+  hrModificationReason String? @db.Text
   documentUrl          String?
 
-  latitude             Float            @default(-14.078775)
-  longitude            Float            @default(-75.751176)
-  employeeSignature    String?          @db.Text // <--- @db.Text PARA FIRMA BASE64
-  observations         String?
-  tareoObservation     String?                   // <--- OBSERVACIÓN MANUAL PARA TAREO SUNAFIL
+  latitude          Float   @default(-14.078775)
+  longitude         Float   @default(-75.751176)
+  employeeSignature String? @db.Text
+  observations      String?
+  tareoObservation  String?
 
-  auditHistory         AttendanceAuditLog[]
+  auditHistory AttendanceAuditLog[]
 
-  createdAt            DateTime         @default(now())
+  createdAt DateTime @default(now())
 
   @@unique([userId, date])
+  @@index([locationId])
 }
 
 model PayrollPeriod {
-  id          String       @id @default(uuid())
-  name        String
-  startDate   DateTime     @db.Date
-  endDate     DateTime     @db.Date
-  status      PeriodStatus @default(OPEN)
+  id        String       @id @default(uuid())
+  name      String
+  startDate DateTime     @db.Date
+  endDate   DateTime     @db.Date
+  status    PeriodStatus @default(OPEN)
 
-  closedAt    DateTime?
-  closedById  String?
-  closedBy    User?        @relation("ClosedPeriods", fields: [closedById], references: [id])
+  closedAt   DateTime?
+  closedById String?
+  closedBy   User?     @relation("ClosedPeriods", fields: [closedById], references: [id])
 
-  companyId   String
-  company     Company      @relation(fields: [companyId], references: [id])
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
 
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([startDate, endDate])
 }
 
 model AttendanceAuditLog {
-  id            String           @id @default(uuid())
-  attendanceId  String
-  attendance    AttendanceRecord @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  id           String           @id @default(uuid())
+  attendanceId String
+  attendance   AttendanceRecord @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
 
-  modifiedById  String
-  modifiedBy    User             @relation("AdminRectifications", fields: [modifiedById], references: [id])
+  modifiedById String
+  modifiedBy   User   @relation("AdminRectifications", fields: [modifiedById], references: [id])
 
-  fieldModified String           @default("checkIn")
+  fieldModified String    @default("checkIn")
   previousValue DateTime?
   newValue      DateTime?
 
-  reason        String           @db.Text
-  documentUrl   String?          @db.Text
-  ipAddress     String?
-  userAgent     String?          @db.Text
+  reason      String  @db.Text
+  documentUrl String? @db.Text
+  ipAddress   String?
+  userAgent   String? @db.Text
 
-  createdAt     DateTime         @default(now())
+  createdAt DateTime @default(now())
 
   @@index([attendanceId])
   @@index([modifiedById])
@@ -295,59 +318,59 @@ model DigitalPaystub {
 }
 
 model PayrollPolicy {
-  id                      String   @id @default(uuid())
-  name                    String   @default("Régimen General 728")
-  daysInMonth             Int      @default(30)
-  hoursPerDay             Float    @default(8.0)
+  id          String @id @default(uuid())
+  name        String @default("Régimen General 728")
+  daysInMonth Int    @default(30)
+  hoursPerDay Float  @default(8.0)
 
-  overtimeFirst2HoursRate Float    @default(1.25)
-  overtimeNextHoursRate   Float    @default(1.35)
+  overtimeFirst2HoursRate Float @default(1.25)
+  overtimeNextHoursRate   Float @default(1.35)
 
-  companyId               String
-  company                 Company  @relation(fields: [companyId], references: [id])
-  users                   User[]
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  users     User[]
 
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model MonthlyAttendanceSignOff {
-  id                   String    @id @default(uuid())
-  userId               String
-  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  year                 Int
-  month                Int
-  closingSignature     String?   @db.Text // Firma NUEVA dibujada a fin de mes (distinta a signatureBase64)
-  signedAt             DateTime?
-  hrSignature          String?   @db.Text // Firma de RRHH
-  isLocked             Boolean   @default(false)
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  year             Int
+  month            Int
+  closingSignature String?   @db.Text
+  signedAt         DateTime?
+  hrSignature      String?   @db.Text
+  isLocked         Boolean   @default(false)
 
   @@unique([userId, year, month])
 }
 
 model BiometricSyncJob {
-  id           String   @id @default(cuid())
-  type         String   @default("AUTO") // "AUTO" o "MANUAL_MONTH"
+  id           String    @id @default(cuid())
+  type         String    @default("AUTO") // "AUTO" o "MANUAL_MONTH"
   month        Int?
   year         Int?
-  status       String   @default("PENDING") // "PENDING", "COMPLETED", "ERROR"
-  recordsSent  Int      @default(0)
-  processedNew Int      @default(0)
+  status       String    @default("PENDING") // "PENDING", "COMPLETED", "ERROR"
+  recordsSent  Int       @default(0)
+  processedNew Int       @default(0)
   errorMessage String?
   requestedBy  String?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
   completedAt  DateTime?
 }
 
 model UnmatchedBiometricLog {
-  id            String         @id @default(cuid())
-  rawCode       String         // DNI o biometricCode enviado por el reloj
-  punchTime     DateTime
-  type          AttendanceType @default(BIOMETRIC_FINGERPRINT)
-  serialNo      String?
-  resolved      Boolean        @default(false)
+  id             String         @id @default(cuid())
+  rawCode        String // DNI o biometricCode enviado por el reloj
+  punchTime      DateTime
+  type           AttendanceType @default(BIOMETRIC_FINGERPRINT)
+  serialNo       String?
+  resolved       Boolean        @default(false)
   resolvedUserId String?
-  createdAt     DateTime       @default(now())
+  createdAt      DateTime       @default(now())
 
   @@index([rawCode, resolved])
 }
