@@ -14,6 +14,9 @@ import {
   Trash2,
   Crosshair,
   Building2,
+  Pencil,
+  Check,
+  X
 } from 'lucide-react';
 
 interface CompanySettings {
@@ -382,12 +385,26 @@ export default function CompanySettingsPage() {
 function AuthorizedLocationsCard() {
   const [locations, setLocations] = useState<AuthorizedLocationItem[]>([]);
   const [loadingLocs, setLoadingLocs] = useState(true);
+
+  // Estado para crear nueva sede
   const [name, setName] = useState('');
   const [address, setAddress] = useState('');
   const [latitude, setLatitude] = useState('');
   const [longitude, setLongitude] = useState('');
   const [radiusM, setRadiusM] = useState(50);
   const [adding, setAdding] = useState(false);
+
+  // Estado para editar sede existente
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({
+    name: '',
+    address: '',
+    latitude: '',
+    longitude: '',
+    radiusM: 50,
+  });
+  const [savingEdit, setSavingEdit] = useState(false);
+
   const [locMsg, setLocMsg] = useState<string | null>(null);
 
   const loadLocations = async () => {
@@ -404,15 +421,21 @@ function AuthorizedLocationsCard() {
     loadLocations();
   }, []);
 
-  const handleUseCurrentGps = () => {
+  const handleUseCurrentGps = (target: 'new' | 'edit') => {
     if (!navigator.geolocation) {
       setLocMsg('Tu navegador no soporta geolocalización.');
       return;
     }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setLatitude(pos.coords.latitude.toFixed(6));
-        setLongitude(pos.coords.longitude.toFixed(6));
+        const lat = pos.coords.latitude.toFixed(6);
+        const lng = pos.coords.longitude.toFixed(6);
+        if (target === 'new') {
+          setLatitude(lat);
+          setLongitude(lng);
+        } else {
+          setEditForm((prev) => ({ ...prev, latitude: lat, longitude: lng }));
+        }
         setLocMsg('Coordenadas GPS actuales capturadas.');
       },
       () =>
@@ -459,6 +482,50 @@ function AuthorizedLocationsCard() {
     }
   };
 
+  const startEditing = (loc: AuthorizedLocationItem) => {
+    setEditingId(loc.id);
+    setEditForm({
+      name: loc.name,
+      address: loc.address || '',
+      latitude: String(loc.latitude),
+      longitude: String(loc.longitude),
+      radiusM: loc.radiusM,
+    });
+    setLocMsg(null);
+  };
+
+  const handleSaveEdit = async (id: string) => {
+    if (!editForm.name.trim() || !editForm.latitude || !editForm.longitude) {
+      setLocMsg('Nombre, latitud y longitud son obligatorios.');
+      return;
+    }
+    setSavingEdit(true);
+    setLocMsg(null);
+    try {
+      const res = await fetch('/api/v1/admin/locations', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id,
+          name: editForm.name,
+          address: editForm.address,
+          latitude: Number(editForm.latitude),
+          longitude: Number(editForm.longitude),
+          radiusM: Number(editForm.radiusM) || 50,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setEditingId(null);
+        await loadLocations();
+      } else {
+        setLocMsg(data.error || 'Error al actualizar sede.');
+      }
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   const handleToggleActive = async (loc: AuthorizedLocationItem) => {
     await fetch('/api/v1/admin/locations', {
       method: 'PUT',
@@ -470,6 +537,7 @@ function AuthorizedLocationsCard() {
 
   const handleDelete = async (id: string) => {
     await fetch(`/api/v1/admin/locations?id=${id}`, { method: 'DELETE' });
+    if (editingId === id) setEditingId(null);
     await loadLocations();
   };
 
@@ -485,7 +553,7 @@ function AuthorizedLocationsCard() {
           </div>
           <button
             type="button"
-            onClick={handleUseCurrentGps}
+            onClick={() => handleUseCurrentGps('new')}
             className="flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-[#00BFA5] border border-slate-700 transition cursor-pointer"
           >
             <Crosshair className="w-3.5 h-3.5" />
@@ -494,17 +562,17 @@ function AuthorizedLocationsCard() {
         </div>
 
         <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-          Solo los trabajadores dentro del perímetro de una sede activa podrán marcar presencialmente.
-          Fuera de estos puntos únicamente marcarán quienes tengan{' '}
-          <strong className="text-slate-200">Trabajo Remoto</strong> habilitado en su perfil.
+          Define las coordenadas y radio permitido de las instalaciones de la empresa. Si no hay
+          sedes activas, ninguna marcación presencial será aceptada y solo podrán marcar quienes
+          tengan <strong className="text-slate-200">Trabajo Remoto</strong> autorizado.
         </p>
 
-        {/* FORMULARIO RÁPIDO NUEVA SEDE (Guardado independiente vía API) */}
+        {/* FORMULARIO NUEVA SEDE */}
         <div className="mt-4 p-3.5 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <input
               type="text"
-              placeholder="Nombre (Ej: Sede Central Ica)"
+              placeholder="Nombre (Ej: Sede Principal)"
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-[#00BFA5] outline-none"
@@ -522,7 +590,7 @@ function AuthorizedLocationsCard() {
             <input
               type="number"
               step="any"
-              placeholder="Latitud (-14.07...)"
+              placeholder="Latitud"
               value={latitude}
               onChange={(e) => setLatitude(e.target.value)}
               className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
@@ -530,7 +598,7 @@ function AuthorizedLocationsCard() {
             <input
               type="number"
               step="any"
-              placeholder="Longitud (-75.75...)"
+              placeholder="Longitud"
               value={longitude}
               onChange={(e) => setLongitude(e.target.value)}
               className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:border-[#00BFA5] outline-none"
@@ -560,43 +628,129 @@ function AuthorizedLocationsCard() {
           {locMsg && <p className="text-[11px] text-amber-300">{locMsg}</p>}
         </div>
 
-        {/* LISTADO DE SEDES */}
-        <div className="mt-4 space-y-2 max-h-52 overflow-y-auto pr-1">
+        {/* LISTADO Y EDICIÓN DE SEDES */}
+        <div className="mt-4 space-y-2 max-h-64 overflow-y-auto pr-1">
           {loadingLocs ? (
             <p className="text-xs text-slate-500">Cargando sedes...</p>
+          ) : locations.length === 0 ? (
+            <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-800/40 text-xs text-amber-200">
+              No hay sedes configuradas. Agrega al menos un punto autorizado para habilitar la marcación presencial.
+            </div>
           ) : (
-            locations.map((loc) => (
-              <div
-                key={loc.id}
-                className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-slate-900 border border-slate-800"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <Building2 className="w-3.5 h-3.5 text-[#00BFA5] shrink-0" />
-                    <span className="text-xs font-bold text-white truncate">{loc.name}</span>
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                      {loc.radiusM}m
-                    </span>
+            locations.map((loc) =>
+              editingId === loc.id ? (
+                <div
+                  key={loc.id}
+                  className="p-3 rounded-xl bg-slate-900 border border-[#00BFA5]/50 space-y-2.5"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={editForm.name}
+                      onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none"
+                      placeholder="Nombre de sede"
+                    />
+                    <input
+                      type="text"
+                      value={editForm.address}
+                      onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none"
+                      placeholder="Dirección"
+                    />
                   </div>
-                  <p className="text-[11px] font-mono text-slate-400 mt-0.5 truncate">
-                    {loc.latitude.toFixed(6)}, {loc.longitude.toFixed(6)}
-                    {loc.address ? ` • ${loc.address}` : ''}
-                  </p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <input
+                      type="number"
+                      step="any"
+                      value={editForm.latitude}
+                      onChange={(e) => setEditForm({ ...editForm, latitude: e.target.value })}
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white outline-none"
+                    />
+                    <input
+                      type="number"
+                      step="any"
+                      value={editForm.longitude}
+                      onChange={(e) => setEditForm({ ...editForm, longitude: e.target.value })}
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white outline-none"
+                    />
+                    <input
+                      type="number"
+                      min={10}
+                      max={2000}
+                      value={editForm.radiusM}
+                      onChange={(e) =>
+                        setEditForm({ ...editForm, radiusM: Number(e.target.value) })
+                      }
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleUseCurrentGps('edit')}
+                      className="text-[11px] text-[#00BFA5] hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <Crosshair className="w-3 h-3" /> Usar mi GPS actual
+                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingId(null)}
+                        className="px-2.5 py-1 rounded-md bg-slate-800 text-slate-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        <X className="w-3 h-3" /> Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        disabled={savingEdit}
+                        onClick={() => handleSaveEdit(loc.id)}
+                        className="px-2.5 py-1 rounded-md bg-[#00BFA5] text-slate-950 text-[11px] font-extrabold flex items-center gap-1 cursor-pointer"
+                      >
+                        <Check className="w-3 h-3" /> Guardar
+                      </button>
+                    </div>
+                  </div>
                 </div>
+              ) : (
+                <div
+                  key={loc.id}
+                  className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-slate-900 border border-slate-800"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Building2 className="w-3.5 h-3.5 text-[#00BFA5] shrink-0" />
+                      <span className="text-xs font-bold text-white truncate">{loc.name}</span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                        {loc.radiusM}m
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-400 mt-0.5 truncate">
+                      {loc.latitude.toFixed(6)}, {loc.longitude.toFixed(6)}
+                      {loc.address ? ` • ${loc.address}` : ''}
+                    </p>
+                  </div>
 
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => handleToggleActive(loc)}
-                    className={`px-2 py-1 rounded-md text-[10px] font-bold border cursor-pointer ${
-                      loc.isActive
-                        ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/50'
-                        : 'bg-slate-800 text-slate-400 border-slate-700'
-                    }`}
-                  >
-                    {loc.isActive ? 'Activa' : 'Inactiva'}
-                  </button>
-                  {locations.length > 1 && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleActive(loc)}
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold border cursor-pointer ${
+                        loc.isActive
+                          ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/50'
+                          : 'bg-slate-800 text-slate-400 border-slate-700'
+                      }`}
+                    >
+                      {loc.isActive ? 'Activa' : 'Inactiva'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => startEditing(loc)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-[#00BFA5] hover:bg-slate-800 transition cursor-pointer"
+                      title="Editar coordenadas o radio"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
                     <button
                       type="button"
                       onClick={() => handleDelete(loc.id)}
@@ -605,10 +759,10 @@ function AuthorizedLocationsCard() {
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
-                  )}
+                  </div>
                 </div>
-              </div>
-            ))
+              )
+            )
           )}
         </div>
       </div>

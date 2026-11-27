@@ -116,18 +116,17 @@ export async function POST(req: NextRequest) {
         'FACIAL_RECOGNITION',
       ].includes(type)
     ) {
-      const activeLocations =
-        company.authorizedLocations && company.authorizedLocations.length > 0
-          ? company.authorizedLocations
-          : [
-              {
-                id: null,
-                name: 'Sede Principal',
-                latitude: company.officeLat,
-                longitude: company.officeLng,
-                radiusM: company.radiusM,
-              },
-            ];
+      const activeLocations = company.authorizedLocations || [];
+
+      if (activeLocations.length === 0) {
+        return NextResponse.json(
+          {
+            error:
+              'La empresa no tiene sedes activas configuradas para marcación presencial. Contacte a Recursos Humanos.',
+          },
+          { status: 403 }
+        );
+      }
 
       let closestDistance = Infinity;
       let closestLocation = activeLocations[0];

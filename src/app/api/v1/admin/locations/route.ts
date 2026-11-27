@@ -9,26 +9,10 @@ export async function GET() {
       return NextResponse.json({ error: 'Empresa no encontrada' }, { status: 404 });
     }
 
-    let locations = await prisma.authorizedLocation.findMany({
+    const locations = await prisma.authorizedLocation.findMany({
       where: { companyId: company.id },
       orderBy: { createdAt: 'asc' },
     });
-
-    // Migración automática: si no hay sedes aún, registra la sede principal de Company
-    if (locations.length === 0) {
-      const defaultLoc = await prisma.authorizedLocation.create({
-        data: {
-          companyId: company.id,
-          name: 'Sede Principal',
-          address: 'Instalaciones Centrales',
-          latitude: company.officeLat,
-          longitude: company.officeLng,
-          radiusM: company.radiusM || 50,
-          isActive: true,
-        },
-      });
-      locations = [defaultLoc];
-    }
 
     return NextResponse.json({ success: true, locations });
   } catch (error: any) {
@@ -53,6 +37,13 @@ export async function POST(req: NextRequest) {
     if (!name?.trim() || isNaN(lat) || isNaN(lng)) {
       return NextResponse.json(
         { error: 'Nombre, latitud y longitud son obligatorios.' },
+        { status: 400 }
+      );
+    }
+
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return NextResponse.json(
+        { error: 'Coordenadas GPS fuera de rango válido.' },
         { status: 400 }
       );
     }
@@ -84,6 +75,20 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'ID de sede requerido' }, { status: 400 });
     }
 
+    if (latitude !== undefined) {
+      const lat = Number(latitude);
+      if (isNaN(lat) || lat < -90 || lat > 90) {
+        return NextResponse.json({ error: 'Latitud inválida.' }, { status: 400 });
+      }
+    }
+
+    if (longitude !== undefined) {
+      const lng = Number(longitude);
+      if (isNaN(lng) || lng < -180 || lng > 180) {
+        return NextResponse.json({ error: 'Longitud inválida.' }, { status: 400 });
+      }
+    }
+
     const updated = await prisma.authorizedLocation.update({
       where: { id },
       data: {
@@ -91,7 +96,9 @@ export async function PUT(req: NextRequest) {
         ...(address !== undefined ? { address: address?.trim() || null } : {}),
         ...(latitude !== undefined ? { latitude: Number(latitude) } : {}),
         ...(longitude !== undefined ? { longitude: Number(longitude) } : {}),
-        ...(radiusM !== undefined ? { radiusM: Math.max(10, Math.min(2000, Number(radiusM))) } : {}),
+        ...(radiusM !== undefined
+          ? { radiusM: Math.max(10, Math.min(2000, Number(radiusM))) }
+          : {}),
         ...(isActive !== undefined ? { isActive: Boolean(isActive) } : {}),
       },
     });

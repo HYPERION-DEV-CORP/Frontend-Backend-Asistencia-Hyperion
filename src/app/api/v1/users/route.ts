@@ -36,6 +36,7 @@ export async function POST(req: NextRequest) {
       biometricCode,
       role,
       isSubjectToSupervision,
+      isRemoteAllowed,
       name,
       lastName,
       email,
@@ -81,6 +82,8 @@ export async function POST(req: NextRequest) {
         role: role && ['ADMIN', 'HR', 'EMPLOYEE'].includes(role) ? role : 'EMPLOYEE',
         isSubjectToSupervision:
           typeof isSubjectToSupervision === 'boolean' ? isSubjectToSupervision : true,
+        isRemoteAllowed:
+          typeof isRemoteAllowed === 'boolean' ? isRemoteAllowed : false,
         name,
         lastName,
         email,

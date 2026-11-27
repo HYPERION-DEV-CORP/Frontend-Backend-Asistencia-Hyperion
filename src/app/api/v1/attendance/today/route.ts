@@ -42,7 +42,8 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      record: record || null,
+      isRemoteAllowed: user.isRemoteAllowed,
+      record,
       companyConfig: {
         biometricCheckInStart: user.company.biometricCheckInStart ?? '06:00',
         biometricCheckInEnd: user.company.biometricCheckInEnd ?? '11:59',

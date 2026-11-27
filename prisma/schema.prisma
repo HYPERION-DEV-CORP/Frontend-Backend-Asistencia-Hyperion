@@ -66,9 +66,9 @@ model Company {
   id        String @id @default(uuid())
   name      String @default("Hyperion Digital Security S.A.C.") // Razón Social exigida por SUNAFIL
   ruc       String @unique @default("20608810987") // RUC de 11 dígitos obligatorio
-  officeLat Float  @default(-14.078775)
-  officeLng Float  @default(-75.751176)
-  radiusM   Float  @default(30.0)
+  officeLat Float @default(0.0)
+  officeLng Float @default(0.0)
+  radiusM   Float @default(50.0)
   qrSecret  String @default("HYPERION_QR_SECRET_KEY_2026")
 
   // CONTROL DE PRUEBA GRATUITA (7 DÍAS) Y SUSCRIPCIÓN

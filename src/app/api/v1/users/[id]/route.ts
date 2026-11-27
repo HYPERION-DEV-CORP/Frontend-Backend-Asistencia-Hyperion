@@ -20,6 +20,7 @@ export async function PUT(
       role,
       biometricCode,
       isSubjectToSupervision,
+      isRemoteAllowed,
       workStartTime,
       toleranceMinutes,
       homeOfficeQuota,
@@ -41,6 +42,7 @@ export async function PUT(
             }
           : {}),
         ...(typeof isSubjectToSupervision === 'boolean' ? { isSubjectToSupervision } : {}),
+        ...(typeof isRemoteAllowed === 'boolean' ? { isRemoteAllowed } : {}),
         workStartTime,
         toleranceMinutes: Number(toleranceMinutes),
         homeOfficeQuota: Number(homeOfficeQuota),

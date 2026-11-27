@@ -95,6 +95,7 @@ export async function POST(req: NextRequest) {
         companyName: user.company.name,
         companyId: user.companyId,
         role: user.role,
+        isRemoteAllowed: user.isRemoteAllowed,
         hasSignature: Boolean(user.signatureBase64),
       },
       companyConfig: {
